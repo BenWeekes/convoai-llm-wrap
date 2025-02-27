@@ -3,9 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 3040",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 3040",
+    "pm2-start": "pm2 start npm --name \"wrap-ui\" -- start",
     "lint": "next lint"
   },
   "dependencies": {
