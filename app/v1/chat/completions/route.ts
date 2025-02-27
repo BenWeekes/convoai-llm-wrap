@@ -123,7 +123,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { messages, model = 'gpt-4o-mini', stream = false, channel='ccc', userId='111', appId='20b7c51ff4c644ab80cf5a4e646b0537' } = body || {};
     
-    console.log(appId);
+    //console.log(messages);
     if (!messages) {
       return new Response(
         JSON.stringify({ error: 'Missing "messages" in request body' }),
