@@ -6,8 +6,9 @@ export const runtime = 'nodejs';
 // 1. Hardcoded RAG data that the LLM can reference.
 const HARDCODED_RAG_DATA = {
   doc1: "The TEN Framework is a powerful conversational AI platform.",
-  doc2: "Agora ConvoAI comes out on March 1st for GA.",
-  doc3: "Tony Wang is the best revenue officer."
+  doc2: "Agora Convo AI comes out on March 1st for GA. It will be best in class for quality and reach",
+  doc3: "Tony Wang is the best revenue officer.",
+  doc4: "Hermes Frangoudis is the best developer."
 };
 
 // 2. Function definitions for LLM function calling.
@@ -31,8 +32,8 @@ const functions = [
 
 // 3. External implementation of order_sandwich.
 //    This function now returns a string result.
-function order_sandwich(filling: string): string {
-  console.log("Placing sandwich order with filling:", filling);
+function order_sandwich(userId: string, channel: string, filling: string): string {
+  console.log("Placing sandwich order for "+userId+" in "+channel+" with filling:", filling);
   return `Sandwich ordered with ${filling}`;
 }
 
@@ -50,7 +51,9 @@ export async function POST(req: NextRequest) {
 
     // 5. Parse the request body.
     const body = await req.json();
-    const { messages, model = 'gpt-4-0613', stream = false } = body || {};
+
+    const { messages, model = 'gpt-4-0613', stream = false, channel, userId} = body || {};
+    //console.info(channel);
     if (!messages) {
       return new Response(
         JSON.stringify({ error: 'Missing "messages" in request body' }),
@@ -71,6 +74,7 @@ export async function POST(req: NextRequest) {
         `doc1: "${HARDCODED_RAG_DATA.doc1}"\n` +
         `doc2: "${HARDCODED_RAG_DATA.doc2}"\n` +
         `doc3: "${HARDCODED_RAG_DATA.doc3}"\n` +
+        `doc4: "${HARDCODED_RAG_DATA.doc4}"\n` +
         `Answer questions using this data if relevant.`
     };
 
@@ -105,7 +109,7 @@ export async function POST(req: NextRequest) {
               // Check for partial function call data.
               if (part.choices[0]?.delta?.function_call) {
                 const fc = part.choices[0].delta.function_call;
-                console.log('function_call', fc.name, fc.arguments);
+                //console.log('function_call', fc.name, fc.arguments);
                 if (fc.name) {
                   functionCallName = fc.name;
                 }
@@ -128,7 +132,7 @@ export async function POST(req: NextRequest) {
                   }
                   if (parsedArgs && parsedArgs.filling) {
                     // Execute the function and capture its return value.
-                    const functionResult = order_sandwich(parsedArgs.filling);
+                    const functionResult = order_sandwich(userId, channel, parsedArgs.filling);
                     // Append a new function message to the conversation.
                     const updatedMessages = [
                       ...fullMessages,
