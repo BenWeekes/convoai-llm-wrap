@@ -46,9 +46,9 @@ const functions = [
 async function sendPeerMessage(appId: string, fromUser: string, toUser: string) {
   const url = `https://api.agora.io/dev/v2/project/${appId}/rtm/users/${fromUser}/peer_messages`;
 
-  // Example JSON payload
   const data = {
-    destination: toUser,
+    //destination: '"'+toUser+'"',
+    destination: String(toUser),
     enable_offline_messaging: true,
     enable_historical_messaging: true,
     payload: '{"img":"https://sa-utils.agora.io/mms/kierap.png"}'
@@ -271,7 +271,8 @@ export async function POST(req: NextRequest) {
 
       // If a function call was made
       if (response.choices && response.choices[0]?.finish_reason === 'function_call') {
-        const fc = response.choices[0].function_call;
+        //const fc = response.choices[0].function_call;
+	const fc = response.choices[0].message?.function_call;
         if (fc?.name && fc.arguments) {
           const fn = functionMap[fc.name];
           if (!fn) {
