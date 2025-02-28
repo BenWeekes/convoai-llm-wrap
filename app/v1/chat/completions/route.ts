@@ -121,7 +121,7 @@ export async function POST(req: NextRequest) {
 
     // 2) Parse the request body. Also read `appId` here.
     const body = await req.json();
-    const { messages, model = 'gpt-4o-mini', stream = false, channel='ccc', userId='111', appId='20b7c51ff4c644ab80cf5a4e646b0537' } = body || {};
+    const { messages, model = 'gpt-4o-mini', baseURL='https://api.openai.com/v1',  stream = false, channel='ccc', userId='111', appId='20b7c51ff4c644ab80cf5a4e646b0537' } = body || {};
     
     //console.log(messages);
     if (!messages) {
@@ -141,8 +141,10 @@ export async function POST(req: NextRequest) {
     // 3) Create an OpenAI client.
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
+      baseURL: baseURL
     });
 
+    console.log(model,baseURL);
     // 4) Inject RAG data into a system message.
     const systemMessage = {
       role: "system" as const,
