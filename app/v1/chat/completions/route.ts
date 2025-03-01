@@ -143,10 +143,10 @@ export async function POST(req: NextRequest) {
       messages,
       model = 'gpt-4o-mini',
       baseURL = 'https://api.openai.com/v1',
-      stream = false, // boolean
+      stream = true, // boolean
       channel = 'ccc',
       userId = '111',
-      appId = '20b7c51ff4c644ab80cf5a4e646b0537',
+      appId = '',
     } = body || {};
 
     if (!messages) {
