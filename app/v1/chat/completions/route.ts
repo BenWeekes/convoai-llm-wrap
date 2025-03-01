@@ -1,18 +1,5 @@
-/**
- * Example: A Next.js route handler that uses the OpenAI "Tools" API,
- * with streaming or non-streaming logic in TypeScript. This version merges
- * partial tool call fragments (resetting if a new function name is seen) and
- * ensures the tool call is executed only once.
- */
-
 import { NextRequest } from 'next/server';
-import OpenAI, {
-  ChatCompletionCreateParamsStreaming,
-  ChatCompletionCreateParamsNonStreaming,
-  ChatCompletionTool,
-  ChatCompletionChunk,
-  ChatCompletion,
-} from 'openai';
+import OpenAI from 'openai';
 import axios from 'axios';
 
 export const runtime = 'nodejs';
@@ -51,7 +38,7 @@ const HARDCODED_RAG_DATA = {
 // -----------------------------------------------------------------------------
 // 2) Tools definitions that match ChatCompletionTool shape
 // -----------------------------------------------------------------------------
-const tools: ChatCompletionTool[] = [
+const tools: OpenAI.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
@@ -118,6 +105,11 @@ async function send_photo(appId: string, userId: string, channel: string): Promi
   await sendPeerMessage(appId, process.env.RTM_FROM_USER as string, userId);
   return `Photo of bikini sent successfully to user ${userId}.`;
 }
+
+// Helper: generate unique call ID
+const generateCallId = () => {
+  return "call_" + Math.random().toString(36).slice(2, 8);
+};
 
 // A map so we can call each tool by name
 const toolMap: Record<
@@ -194,175 +186,195 @@ export async function POST(req: NextRequest) {
     };
     const fullMessages = [systemMessage, ...messages];
 
-    // E) Define requestOptions based on stream flag
-    let requestOptions:
-      | ChatCompletionCreateParamsStreaming
-      | ChatCompletionCreateParamsNonStreaming;
-
-    if (stream) {
-      requestOptions = {
-        model,
-        messages: fullMessages,
-        tools,
-        stream: true
-      };
-    } else {
-      requestOptions = {
-        model,
-        messages: fullMessages,
-        tools,
-        stream: false
-      };
-    }
+    // E) Define request parameters
+    const commonParams = {
+      model,
+      messages: fullMessages,
+      tools,
+    };
 
     // F) Call the LLM
-    const initialResponse = await openai.chat.completions.create(requestOptions);
+    if (stream) {
+      // For streaming, pass in the streaming parameters
+      const streamingResponse = await openai.chat.completions.create({
+        ...commonParams,
+        stream: true,
+      });
 
-    // G) For non-streaming, return JSON response
-    if (!stream) {
-      return new Response(JSON.stringify(initialResponse), {
+      // G) For streaming, process async iterator of ChatCompletionChunk
+      const encoder = new TextEncoder();
+
+      // We'll merge partial tool call fragments into a single object.
+      let accumulatedToolCall: any = null;
+      let toolExecuted = false; // ensure we process the tool only once
+      let controllerClosed = false; // Flag to track if controller is closed
+
+      const streamBody = new ReadableStream({
+        async start(controller) {
+          try {
+            for await (const part of streamingResponse) {
+              // Skip if controller is closed
+              if (controllerClosed) continue;
+              
+              const chunk = part.choices?.[0];
+              const delta = chunk?.delta;
+
+              // Merge any partial tool_calls
+              if (delta?.tool_calls) {
+                for (const tCall of delta.tool_calls) {
+                  // If accumulatedToolCall is null or this fragment's function name differs, reset it.
+                  if (!accumulatedToolCall || (tCall.function?.name && accumulatedToolCall.function?.name && tCall.function.name !== accumulatedToolCall.function.name)) {
+                    accumulatedToolCall = tCall;
+                    if (!accumulatedToolCall.id) {
+                      accumulatedToolCall.id = generateCallId();
+                    }
+                    if (typeof accumulatedToolCall.index !== "number") {
+                      accumulatedToolCall.index = 0;
+                    }
+                    if (!accumulatedToolCall.type) {
+                      accumulatedToolCall.type = "function";
+                    }
+                    if (!accumulatedToolCall.function) {
+                      accumulatedToolCall.function = {};
+                    }
+                  } else {
+                    // Otherwise merge fragments
+                    if (tCall.function) {
+                      if (tCall.function.name) {
+                        accumulatedToolCall.function.name = tCall.function.name;
+                      }
+                      if (tCall.function.arguments) {
+                        if (accumulatedToolCall.function.arguments) {
+                          accumulatedToolCall.function.arguments += tCall.function.arguments;
+                        } else {
+                          accumulatedToolCall.function.arguments = tCall.function.arguments;
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              // Stream current chunk out
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(part)}\n\n`));
+
+              // When finish_reason is reached, process tool call only once
+              if (chunk?.finish_reason && !toolExecuted) {
+                toolExecuted = true;
+                if (accumulatedToolCall) {
+                  // Ensure nested function object has a name
+                  if (!accumulatedToolCall.function || !accumulatedToolCall.function.name) {
+                    console.error("Accumulated tool call is missing function.name.");
+                  } else {
+                    const callName = accumulatedToolCall.function.name;
+                    const callArgsStr = accumulatedToolCall.function.arguments || "{}";
+                    const fn = toolMap[callName];
+                    if (fn) {
+                      let parsedArgs: any = {};
+                      try {
+                        parsedArgs = safeJSONParse(callArgsStr);
+                      } catch (err) {
+                        console.error("Failed to parse tool call arguments:", err);
+                      }
+                      console.log(
+                        `Calling ${callName} for ${userId} in ${channel} with args:`,
+                        JSON.stringify(parsedArgs)
+                      );
+                      // Append an assistant message with valid tool_calls
+                      const updatedMessages = [
+                        ...fullMessages,
+                        {
+                          role: "assistant",
+                          content: "",
+                          tool_calls: [accumulatedToolCall]
+                        }
+                      ];
+                      // Execute the tool function
+                      const toolResult = await fn(appId, userId, channel, parsedArgs);
+                      console.log(`Tool result: ${toolResult}`); // Log to verify result content
+                      
+                      // Append a tool message referencing the same call id
+                      updatedMessages.push({
+                        role: "tool",
+                        name: callName,
+                        content: toolResult,
+                        tool_call_id: accumulatedToolCall.id
+                      });
+                      
+                      // Final streaming call with updated conversation
+                      const finalResponse = await openai.chat.completions.create({
+                        model,
+                        messages: updatedMessages,
+                        tools,
+                        stream: true
+                      });
+                      
+                      try {
+                        for await (const part2 of finalResponse) {
+                          if (controllerClosed) break; // Skip if controller is closed
+                          controller.enqueue(encoder.encode(`data: ${JSON.stringify(part2)}\n\n`));
+                        }
+                      } catch (streamErr) {
+                        // If an error occurs while streaming the final response,
+                        // just log it and allow the stream to close normally
+                        console.error("Error in final response stream:", streamErr);
+                      }
+                    } else {
+                      console.error("Unknown tool name:", callName);
+                    }
+                  }
+                }
+                
+                // End SSE - make sure we only do this once
+                if (!controllerClosed) {
+                  controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+                  controllerClosed = true;
+                  controller.close();
+                }
+                return;
+              }
+            }
+            
+            // Normal end of stream if no tool call was processed
+            if (!controllerClosed) {
+              controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+              controllerClosed = true;
+              controller.close();
+            }
+          } catch (err) {
+            console.error("OpenAI streaming error:", err);
+            // Only try to send an error if the controller isn't closed
+            if (!controllerClosed) {
+              try {
+                controller.error(err);
+                controllerClosed = true;
+              } catch (controllerErr) {
+                console.error("Error while sending error to controller:", controllerErr);
+              }
+            }
+          }
+        }
+      });
+
+      return new Response(streamBody, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive"
+        }
+      });
+    } else {
+      // For non-streaming, call with stream: false explicitly
+      const nonStreamingResponse = await openai.chat.completions.create({
+        ...commonParams,
+        stream: false
+      });
+      
+      return new Response(JSON.stringify(nonStreamingResponse), {
         status: 200,
         headers: { 'Content-Type': 'application/json' }
       });
     }
-
-    // H) For streaming, process async iterator of ChatCompletionChunk
-    const encoder = new TextEncoder();
-
-    // We'll merge partial tool call fragments into a single object.
-    let accumulatedToolCall: any = null;
-    let toolExecuted = false; // ensure we process the tool only once
-
-    // Helper: generate unique call ID if needed.
-    function generateCallId() {
-      return "call_" + Math.random().toString(36).slice(2, 8);
-    }
-
-    const streamBody = new ReadableStream({
-      async start(controller) {
-        try {
-          for await (const part of initialResponse) {
-            const chunk = part.choices?.[0];
-            const delta = chunk?.delta;
-
-            // Merge any partial tool_calls
-            if (delta?.tool_calls) {
-              for (const tCall of delta.tool_calls) {
-                // If accumulatedToolCall is null or this fragment's function name differs, reset it.
-                if (!accumulatedToolCall || (tCall.function?.name && accumulatedToolCall.function?.name && tCall.function.name !== accumulatedToolCall.function.name)) {
-                  accumulatedToolCall = tCall;
-                  if (!accumulatedToolCall.id) {
-                    accumulatedToolCall.id = generateCallId();
-                  }
-                  if (typeof accumulatedToolCall.index !== "number") {
-                    accumulatedToolCall.index = 0;
-                  }
-                  if (!accumulatedToolCall.type) {
-                    accumulatedToolCall.type = "function";
-                  }
-                  if (!accumulatedToolCall.function) {
-                    accumulatedToolCall.function = {};
-                  }
-                } else {
-                  // Otherwise merge fragments
-                  if (tCall.function) {
-                    if (tCall.function.name) {
-                      accumulatedToolCall.function.name = tCall.function.name;
-                    }
-                    if (tCall.function.arguments) {
-                      if (accumulatedToolCall.function.arguments) {
-                        accumulatedToolCall.function.arguments += tCall.function.arguments;
-                      } else {
-                        accumulatedToolCall.function.arguments = tCall.function.arguments;
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            // Stream current chunk out
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(part)}\n\n`));
-
-            // When finish_reason is reached, process tool call only once
-            if (chunk?.finish_reason && !toolExecuted) {
-              toolExecuted = true;
-              if (accumulatedToolCall) {
-                // Ensure nested function object has a name
-                if (!accumulatedToolCall.function || !accumulatedToolCall.function.name) {
-                  console.error("Accumulated tool call is missing function.name.");
-                } else {
-                  const callName = accumulatedToolCall.function.name;
-                  const callArgsStr = accumulatedToolCall.function.arguments || "{}";
-                  const fn = toolMap[callName];
-                  if (fn) {
-                    let parsedArgs: any = {};
-                    try {
-                      parsedArgs = safeJSONParse(callArgsStr);
-                    } catch (err) {
-                      console.error("Failed to parse tool call arguments:", err);
-                    }
-                    console.log(
-                      `Calling ${callName} for ${userId} in ${channel} with args:`,
-                      JSON.stringify(parsedArgs)
-                    );
-                    // Append an assistant message with valid tool_calls
-                    const updatedMessages = [
-                      ...fullMessages,
-                      {
-                        role: "assistant",
-                        content: "",
-                        tool_calls: [accumulatedToolCall]
-                      }
-                    ];
-                    // Execute the tool function
-                    const toolResult = await fn(appId, userId, channel, parsedArgs);
-                    console.log(`Tool result: ${toolResult}`); // Log to verify result content
-                    
-                    // Append a tool message referencing the same call id
-                    updatedMessages.push({
-                      role: "tool",
-                      name: callName,
-                      content: toolResult,
-                      tool_call_id: accumulatedToolCall.id
-                    });
-                    
-                    // Final streaming call with updated conversation
-                    const finalRequest: ChatCompletionCreateParamsStreaming = {
-                      model,
-                      messages: updatedMessages,
-                      tools,
-                      stream: true
-                    };
-                    const finalResponse = await openai.chat.completions.create(finalRequest);
-                    for await (const part2 of finalResponse) {
-                      controller.enqueue(encoder.encode(`data: ${JSON.stringify(part2)}\n\n`));
-                    }
-                  } else {
-                    console.error("Unknown tool name:", callName);
-                  }
-                }
-              }
-              // End SSE
-              controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
-              controller.close();
-              return;
-            }
-          }
-        } catch (err) {
-          console.error("OpenAI streaming error:", err);
-          controller.error(err);
-        }
-      }
-    });
-
-    return new Response(streamBody, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive"
-      }
-    });
   } catch (err: any) {
     console.error("Chat Completions Error:", err);
     return new Response(JSON.stringify({ error: err.message }), {
