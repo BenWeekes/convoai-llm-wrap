@@ -190,7 +190,8 @@ export async function POST(req: NextRequest) {
     const commonParams = {
       model,
       messages: fullMessages,
-      tools,
+      tools: tools,
+      tool_choice: "auto",
     };
 
     // F) Call the LLM
@@ -305,7 +306,7 @@ export async function POST(req: NextRequest) {
                       const finalResponse = await openai.chat.completions.create({
                         model,
                         messages: updatedMessages,
-                        tools,
+                        tools: tools,
                         stream: true
                       });
                       
