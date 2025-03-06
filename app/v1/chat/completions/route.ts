@@ -145,8 +145,13 @@ const tools: OpenAI.ChatCompletionTool[] = [
       description: "Request a photo be sent to the user.",
       parameters: {
         type: "object",
-        properties: {},
-        required: []
+        properties: {
+          subject: {
+            type: "string",
+            description: "Type of photo subject (e.g. 'face', 'full_body', 'landscape')"
+          }
+        },
+        required: ["subject"]
       }
     }
   }
@@ -182,10 +187,11 @@ function order_sandwich(userId: string, channel: string, filling: string): strin
   return `Sandwich ordered with ${filling}. It will arrive at 3pm. Enjoy!`;
 }
 
-async function send_photo(appId: string, userId: string, channel: string): Promise<string> {
-  console.log("Sending photo to", userId, "in", channel);
+async function send_photo(appId: string, userId: string, channel: string, args: any): Promise<string> {
+  const subject = args.subject || "default";
+  console.log(`Sending ${subject} photo to ${userId} in ${channel}`);
   await sendPeerMessage(appId, process.env.RTM_FROM_USER as string, userId);
-  return `Photo request processed successfully.`;
+  return `Photo of ${subject} sent successfully.`;
 }
 
 // Helper: generate unique call ID
@@ -200,8 +206,8 @@ const toolMap: Record<
 > = {
   order_sandwich: (_appId, userId, channel, args) =>
     order_sandwich(userId, channel, args.filling),
-  send_photo: (appId, userId, channel, _args) =>
-    send_photo(appId, userId, channel),
+  send_photo: (appId, userId, channel, args) =>
+    send_photo(appId, userId, channel, args),
 };
 
 // -----------------------------------------------------------------------------
@@ -300,6 +306,41 @@ function modelRequiresSpecialHandling(model: string): boolean {
   );
 }
 
+// Special handling for Llama/Trulience models experiencing 400 errors
+function isFollowUpWithToolResponsesPresent(messages: any[]): boolean {
+  for (let i = 0; i < messages.length - 1; i++) {
+    // Look for an assistant message with tool_calls followed by a tool response
+    if (
+      messages[i].role === 'assistant' && 
+      messages[i].tool_calls && 
+      messages[i+1].role === 'tool'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// For Llama models, simplify messages for second turn after tool call
+function simplifyMessagesForLlama(messages: any[]): any[] {
+  // If this is a follow-up message after a tool call, simplify the history
+  if (isFollowUpWithToolResponsesPresent(messages)) {
+    const systemMessages = messages.filter(m => m.role === 'system');
+    
+    // Find the last user message
+    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+    
+    if (lastUserMessage) {
+      // Create a simpler history
+      console.log("Simplifying message history for Llama model follow-up");
+      return [...systemMessages, lastUserMessage];
+    }
+  }
+  
+  // Otherwise return the original messages
+  return messages;
+}
+
 // -----------------------------------------------------------------------------
 // Error handling: Try to recover from common errors
 // -----------------------------------------------------------------------------
@@ -321,8 +362,12 @@ async function handleModelRequest(openai: OpenAI, params: any, fallbackModel = '
         // Create a deep clone of the parameters to avoid modifying original
         const llamaParams = JSON.parse(JSON.stringify(params));
         
-        // Check if we need to simplify the message history
-        if (llamaParams.messages.length > 10) {
+        // Check if this is a follow-up after tool use and simplify if needed
+        if (isFollowUpWithToolResponsesPresent(llamaParams.messages)) {
+          llamaParams.messages = simplifyMessagesForLlama(llamaParams.messages);
+        }
+        // Otherwise check if we need to simplify the message history due to length
+        else if (llamaParams.messages.length > 10) {
           console.log(`Message history is long (${llamaParams.messages.length}), truncating...`);
           // Keep the most recent messages
           const systemMessages = llamaParams.messages.filter((m: any) => m.role === 'system');
@@ -335,7 +380,28 @@ async function handleModelRequest(openai: OpenAI, params: any, fallbackModel = '
         return await openai.chat.completions.create(llamaParams);
       } catch (llamaError: any) {
         console.error(`Llama-specific retry failed:`, llamaError.message || 'Unknown error');
-        throw error; // Re-throw the original error
+        
+        // Last resort: Try without tools for Llama
+        try {
+          console.log(`Attempting last resort for Llama: no tools, simplified conversation...`);
+          const lastResortParams = JSON.parse(JSON.stringify(params));
+          
+          // Find system messages and the last user message
+          const systemMessages = lastResortParams.messages.filter((m: any) => m.role === 'system');
+          const lastUserMessage = [...lastResortParams.messages].reverse().find((m: any) => m.role === 'user');
+          
+          if (lastUserMessage) {
+            lastResortParams.messages = [...systemMessages, lastUserMessage];
+            lastResortParams.tools = undefined;
+            lastResortParams.tool_choice = undefined;
+            
+            return await openai.chat.completions.create(lastResortParams);
+          }
+        } catch (lastResortError) {
+          console.error(`Last resort for Llama failed:`, lastResortError);
+        }
+        
+        throw error; // Re-throw the original error if all Llama-specific approaches fail
       }
     }
     
@@ -445,9 +511,9 @@ function insertCachedToolResponses(messages: any[]): any[] {
               let fallbackContent = "";
               
               if (toolName === 'send_photo') {
-                fallbackContent = "Photo request processed successfully.";
+                fallbackContent = "Photo of face sent successfully.";
               } else if (toolName === 'order_sandwich') {
-                fallbackContent = "Sandwich order processed successfully.";
+                fallbackContent = "Sandwich ordered with cheese. It will arrive at 3pm. Enjoy!";
               } else {
                 fallbackContent = `${toolName} function executed successfully.`;
               }
@@ -566,12 +632,23 @@ export async function POST(req: RequestWithJson) {
     
     // Process messages and insert cached tool responses if needed
     const processedMessages = insertCachedToolResponses(messages);
-    const fullMessages = [systemMessage, ...processedMessages];
+    
+    // Check if this is a Llama/Trulience model and if we need to simplify the conversation
+    let finalMessages;
+    if ((typeof model === 'string' && 
+        (model.toLowerCase().includes('llama') || model.toLowerCase().includes('trulience'))) &&
+        isFollowUpWithToolResponsesPresent(processedMessages)) {
+      
+      // Use a simplified message history for Llama models on the second turn
+      finalMessages = [systemMessage, ...simplifyMessagesForLlama(processedMessages)];
+    } else {
+      finalMessages = [systemMessage, ...processedMessages];
+    }
 
     // E) Define request parameters
     const requestParams: any = {
       model,
-      messages: fullMessages,
+      messages: finalMessages,
       stream: false
     };
 
@@ -696,7 +773,7 @@ export async function POST(req: RequestWithJson) {
                         
                         // Append an assistant message with valid tool_calls
                         const updatedMessages = [
-                          ...fullMessages,
+                          ...finalMessages,
                           {
                             role: "assistant",
                             content: "",
