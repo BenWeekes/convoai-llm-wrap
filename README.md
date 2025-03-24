@@ -44,7 +44,7 @@ This server provides a clean architecture for building LLM-powered API endpoints
 
 ### Step 1: Set Up Environment Variables
 
-Create a `.env.local` file in the root of your project:
+Create a `.env` file in the root of your project:
 
 ```
 API_TOKEN=your_server_auth_token
