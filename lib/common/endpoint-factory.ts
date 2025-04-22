@@ -1,14 +1,16 @@
 // File: lib/common/endpoint-factory.ts
-// Factory function to create standardized endpoint handlers
+// Factory function to create standardized endpoint handlers with multi-pass tool support
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import type { RequestWithJson, EndpointConfig } from '../types';
-import { validateToken, logFullResponse, generateCallId, modelRequiresSpecialHandling, safeJSONParse } from './utils';
+import { validateToken, logFullResponse, generateCallId, safeJSONParse } from './utils';
 import { logCacheState, storeToolResponse } from './cache';
 import { insertCachedToolResponses } from './message-processor';
 import { handleModelRequest } from './model-handler';
 import { simplifyMessagesForLlama, isFollowUpWithToolResponsesPresent } from './utils';
+
+const DEFAULT_CHUNK_SIZE = 4096;
 
 /**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
@@ -34,6 +36,7 @@ export function createEndpointHandler(config: EndpointConfig) {
         channel = 'ccc',
         userId = '111',
         appId = '',
+        simplifiedTools = false, // New parameter to toggle simple tool handling
         stream_options = {}
       } = body || {};
 
@@ -69,51 +72,34 @@ export function createEndpointHandler(config: EndpointConfig) {
       // Process messages and insert cached tool responses if needed
       const processedMessages = insertCachedToolResponses(messages);
       
-      // Check if this is a Llama/Trulience model and if we need to simplify the conversation
-      let finalMessages;
-      if ((typeof model === 'string' && 
-          (model.toLowerCase().includes('llama') || model.toLowerCase().includes('trulience'))) &&
-          isFollowUpWithToolResponsesPresent(processedMessages)) {
-        
-        // Use a simplified message history for Llama models on the second turn
+      // Prepare final messages
+      let finalMessages = [systemMessage, ...processedMessages];
+
+      // Check if simplification is needed based on message context
+      if (isFollowUpWithToolResponsesPresent(processedMessages)) {
         finalMessages = [systemMessage, ...simplifyMessagesForLlama(processedMessages)];
-      } else {
-        finalMessages = [systemMessage, ...processedMessages];
       }
 
-      // E) Define request parameters
-      const requestParams: any = {
+      // Common request parameters
+      const commonRequestParams: any = {
         model,
-        messages: finalMessages,
         stream: false
       };
 
-      // Special handling for Llama models - keep tools but adjust parameters if needed
-      if (typeof model === 'string' && 
-          (model.toLowerCase().includes('llama') || model.toLowerCase().includes('trulience'))) {
-        console.log(`Detected Llama/Trulience model: ${model}`);
-        // We'll keep tools but handle any errors with the specific Llama retry logic
-        requestParams.tools = config.tools;
-        requestParams.tool_choice = "auto";
-      } 
-      // For other models that might need special handling
-      else if (modelRequiresSpecialHandling(model)) {
-        console.log(`Model ${model} may require special handling. Simplifying request...`);
-        // For non-OpenAI models, we won't include tools
-      } else {
-        // For standard OpenAI models, include tools
-        requestParams.tools = config.tools;
-        requestParams.tool_choice = "auto";
+      // Add tools if not using simplified tool handling
+      if (!simplifiedTools) {
+        commonRequestParams.tools = config.tools;
+        commonRequestParams.tool_choice = "auto";
       }
 
       console.info('stream', stream);
-      console.dir(requestParams, { depth: null, colors: true });
+      console.dir(commonRequestParams, { depth: null, colors: true });
 
-      // F) Call the LLM
+      // F) Handle the request based on streaming preference
       if (stream) {
         try {
           // Set up streaming parameters
-          const streamParams = { ...requestParams, stream: true };
+          const streamParams = { ...commonRequestParams, messages: finalMessages, stream: true };
           
           // Make the request with error handling
           const streamingResponse = await handleModelRequest(openai, streamParams);
@@ -249,8 +235,8 @@ export function createEndpointHandler(config: EndpointConfig) {
                               stream: true
                             };
 
-                            // Add tools if appropriate for the model
-                            if (!modelRequiresSpecialHandling(model)) {
+                            // Add tools if not using simplified tools
+                            if (!simplifiedTools) {
                               finalStreamParams.tools = config.tools;
                               finalStreamParams.tool_choice = "auto";
                             }
@@ -363,17 +349,81 @@ export function createEndpointHandler(config: EndpointConfig) {
           return NextResponse.json(errorResponse, { status: 500 });
         }
       } else {
-        // For non-streaming, call with stream: false explicitly
-        try {
-          const nonStreamingResponse = await handleModelRequest(openai, requestParams);
-          
-          // Log the complete non-streaming response
-          logFullResponse("NON-STREAM", nonStreamingResponse);
-          
-          return NextResponse.json(nonStreamingResponse, { status: 200 });
-        } catch (error) {
-          throw error; // Let the outer catch block handle it
+        // =====================
+        // NON-STREAMING WITH MULTI-PASS TOOL CALLING
+        // =====================
+        let updatedMessages = [...finalMessages];
+        let passCount = 0;
+        const maxPasses = 5;
+        let finalResp: any = null;
+
+        // Multi-pass logic
+        while (passCount < maxPasses) {
+          passCount++;
+          console.log(`[Non-Stream] ---- PASS #${passCount} ----`);
+
+          const passResponse = await handleModelRequest(openai, {
+            ...commonRequestParams,
+            messages: updatedMessages,
+          });
+
+          finalResp = passResponse;
+          const firstChoice = passResponse?.choices?.[0];
+          if (!firstChoice) {
+            console.log('[Non-Stream] No choices returned; stopping.');
+            break;
+          }
+
+          const toolCalls = firstChoice.message?.tool_calls || [];
+          if (!toolCalls.length) {
+            // no tool calls => done
+            break;
+          }
+
+          // If there are tool calls, execute them, append results
+          for (const tCall of toolCalls) {
+            const callName = tCall?.function?.name;
+            if (!callName) continue;
+
+            const fn = config.toolMap[callName];
+            if (!fn) {
+              console.error('[Non-Stream] Unknown tool name:', callName);
+              continue;
+            }
+            let parsedArgs = {};
+            try {
+              parsedArgs = safeJSONParse(tCall.function?.arguments || '{}');
+            } catch (err) {
+              console.error('[Non-Stream] Could not parse tool arguments:', err);
+            }
+
+            const toolResult = await fn(appId, userId, channel, parsedArgs);
+            storeToolResponse(tCall.id, callName, toolResult);
+
+            // Add to messages
+            updatedMessages.push({
+              role: 'assistant',
+              content: '',
+              tool_calls: [tCall],
+            });
+            updatedMessages.push({
+              role: 'tool',
+              name: callName,
+              content: toolResult,
+              tool_call_id: tCall.id,
+            });
+          }
+        } // end multi-pass
+
+        // finalResp has the last pass's text
+        if (!finalResp) {
+          return NextResponse.json({ error: 'No LLM response.' }, { status: 500 });
         }
+
+        // Log the complete non-streaming response
+        logFullResponse("NON-STREAM", finalResp);
+        
+        return NextResponse.json(finalResp, { status: 200 });
       }
     } catch (error: unknown) {
       console.error("Chat Completions Error:", error);
