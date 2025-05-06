@@ -4,11 +4,12 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import type { RequestWithJson, EndpointConfig } from '../types';
-import { validateToken, logFullResponse, generateCallId, safeJSONParse } from './utils';
+import { validateToken, logFullResponse, generateCallId, safeJSONParse, extractCommands } from './utils';
 import { logCacheState, storeToolResponse } from './cache';
 import { insertCachedToolResponses } from './message-processor';
 import { handleModelRequest } from './model-handler';
 import { simplifyMessagesForLlama, isFollowUpWithToolResponsesPresent } from './utils';
+import rtmClientManager, { RTMClientParams } from './rtm-client-manager';
 
 const DEFAULT_CHUNK_SIZE = 4096;
 
@@ -32,13 +33,32 @@ export function createEndpointHandler(config: EndpointConfig) {
         messages,
         model = 'gpt-4o-mini',
         baseURL = 'https://api.openai.com/v1',
+        apiKey = process.env.OPENAI_API_KEY,
         stream = true, // boolean
         channel = 'ccc',
         userId = '111',
         appId = '',
         simplifiedTools = false, // New parameter to toggle simple tool handling
-        stream_options = {}
+        stream_options = {},
+        // RTM parameters
+        enable_rtm = false,
+        agent_rtm_uid = '',
+        agent_rtm_token = '',
+        agent_rtm_channel = ''
       } = body || {};
+
+      // Gather RTM parameters, including appId from request
+      const rtmParams: RTMClientParams = {
+        enable_rtm,
+        agent_rtm_uid,
+        agent_rtm_token,
+        agent_rtm_channel,
+        appId    // Pass the appId from the request
+      };
+
+      // Initialize RTM if enabled
+      const rtmClient = enable_rtm ? 
+        await rtmClientManager.getOrCreateClient(rtmParams) : null;
 
       console.log('Request body:');
       console.dir(body, { depth: null, colors: true });
@@ -59,7 +79,7 @@ export function createEndpointHandler(config: EndpointConfig) {
 
       // C) Create OpenAI client
       const openai = new OpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
+        apiKey: apiKey,
         baseURL
       });
 
@@ -114,6 +134,9 @@ export function createEndpointHandler(config: EndpointConfig) {
           
           // Track chunks sent to client for logging
           const completeResponse: any[] = [];
+          
+          // Accumulate the full text response for command extraction
+          let accumulatedText = '';
 
           const streamBody = new ReadableStream({
             async start(controller) {
@@ -124,6 +147,11 @@ export function createEndpointHandler(config: EndpointConfig) {
                   
                   const chunk = part.choices?.[0];
                   const delta = chunk?.delta;
+
+                  // Accumulate text response for command extraction later
+                  if (delta?.content) {
+                    accumulatedText += delta.content;
+                  }
 
                   // Merge any partial tool_calls
                   if (delta?.tool_calls) {
@@ -246,6 +274,14 @@ export function createEndpointHandler(config: EndpointConfig) {
                             for await (const part2 of finalResponse) {
                               if (controllerClosed) break; // Skip if controller is closed
                               
+                              const chunk2 = part2.choices?.[0];
+                              const delta2 = chunk2?.delta;
+                              
+                              // Accumulate text for command extraction
+                              if (delta2?.content) {
+                                accumulatedText += delta2.content;
+                              }
+                              
                               // Store for comprehensive logging
                               completeResponse.push({
                                 type: "final_stream",
@@ -273,6 +309,29 @@ export function createEndpointHandler(config: EndpointConfig) {
                       }
                     }
                     
+                    // Process any commands in the accumulated text
+                    if (rtmClient && enable_rtm && agent_rtm_channel) {
+                      const { extractedCommands, cleanedText } = extractCommands(accumulatedText);
+                      
+                      // Send commands to RTM channel if any were found
+                      if (extractedCommands.length > 0) {
+                        console.log(`[RTM] Extracted ${extractedCommands.length} commands from response`);
+                        for (const cmd of extractedCommands) {
+                          await rtmClientManager.sendMessageToChannel(
+                            rtmClient,
+                            agent_rtm_channel,
+                            cmd
+                          );
+                        }
+                        
+                        // Update the accumulated text to the cleaned version (without commands)
+                        accumulatedText = cleanedText;
+                        
+                        // Update RTM last active timestamp - now passing appId
+                        rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
+                      }
+                    }
+                    
                     // End SSE - make sure we only do this once
                     if (!controllerClosed) {
                       const doneString = `data: [DONE]\n\n`;
@@ -288,6 +347,29 @@ export function createEndpointHandler(config: EndpointConfig) {
                       logFullResponse("STREAM WITH TOOL", completeResponse);
                     }
                     return;
+                  }
+                }
+                
+                // Process any commands in the accumulated text (for non-tool case)
+                if (rtmClient && enable_rtm && agent_rtm_channel) {
+                  const { extractedCommands, cleanedText } = extractCommands(accumulatedText);
+                  
+                  // Send commands to RTM channel if any were found
+                  if (extractedCommands.length > 0) {
+                    console.log(`[RTM] Extracted ${extractedCommands.length} commands from response`);
+                    for (const cmd of extractedCommands) {
+                      await rtmClientManager.sendMessageToChannel(
+                        rtmClient,
+                        agent_rtm_channel,
+                        cmd
+                      );
+                    }
+                    
+                    // Update the accumulated text to the cleaned version (without commands)
+                    accumulatedText = cleanedText;
+                    
+                    // Update RTM last active timestamp - now passing appId
+                    rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
                   }
                 }
                 
@@ -356,6 +438,7 @@ export function createEndpointHandler(config: EndpointConfig) {
         let passCount = 0;
         const maxPasses = 5;
         let finalResp: any = null;
+        let accumulatedText = '';
 
         // Multi-pass logic
         while (passCount < maxPasses) {
@@ -372,6 +455,11 @@ export function createEndpointHandler(config: EndpointConfig) {
           if (!firstChoice) {
             console.log('[Non-Stream] No choices returned; stopping.');
             break;
+          }
+
+          // Accumulate any text for command extraction
+          if (firstChoice.message?.content) {
+            accumulatedText = firstChoice.message.content;
           }
 
           const toolCalls = firstChoice.message?.tool_calls || [];
@@ -418,6 +506,38 @@ export function createEndpointHandler(config: EndpointConfig) {
         // finalResp has the last pass's text
         if (!finalResp) {
           return NextResponse.json({ error: 'No LLM response.' }, { status: 500 });
+        }
+
+        // Extract commands from the final response text (if RTM is enabled)
+        if (rtmClient && enable_rtm && agent_rtm_channel && accumulatedText) {
+          const { extractedCommands, cleanedText } = extractCommands(accumulatedText);
+          
+          /*
+          await rtmClientManager.sendMessageToChannel(
+            rtmClient,
+            agent_rtm_channel,
+            "BALLSACK"
+          ); */
+
+          // Send commands to RTM channel if any were found
+          if (extractedCommands.length > 0) {
+            console.log(`[RTM] Extracted ${extractedCommands.length} commands from non-streaming response`);
+            for (const cmd of extractedCommands) {
+              await rtmClientManager.sendMessageToChannel(
+                rtmClient,
+                agent_rtm_channel,
+                cmd
+              );
+            }
+            
+            // Update the response with the cleaned text
+            if (finalResp?.choices?.[0]?.message?.content) {
+              finalResp.choices[0].message.content = cleanedText;
+            }
+            
+            // Update RTM last active timestamp - now passing appId
+            rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
+          }
         }
 
         // Log the complete non-streaming response

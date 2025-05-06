@@ -100,8 +100,8 @@ class RTMService {
         
         const userId = event.publisher;
         const appId = process.env.RTM_APP_ID || '';
-        const model = process.env.LLM_MODEL || 'gpt-4o-mini';
-        const baseURL = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
+        const model = process.env.RTM_LLM_MODEL || 'gpt-4o-mini';
+        const baseURL = process.env.RTM_LLM_BASE_URL || 'https://api.openai.com/v1';
         
         // Get or create conversation
         const conversation = await getOrCreateConversation(appId, userId);

@@ -33,6 +33,35 @@ export function generateCallId(): string {
 }
 
 /**
+ * Extract commands from text that start with <trl- and end with />
+ * Returns the extracted commands and the cleaned text without the commands
+ */
+export function extractCommands(text: string): { extractedCommands: string[], cleanedText: string } {
+  const extractedCommands: string[] = [];
+  let cleanedText = text;
+  
+  // Define the regex pattern to find commands
+  // Match anything that starts with <trl- and ends with />
+  const pattern = /<trl-[^>]*?\/>/g;
+  
+  // Find all matches
+  const matches = text.match(pattern);
+  
+  if (matches && matches.length > 0) {
+    // Store all matches in the extracted commands array
+    extractedCommands.push(...matches);
+    
+    // Remove all commands from the cleaned text
+    cleanedText = text.replace(pattern, '');
+    
+    // Log the extracted commands
+    console.log(`Extracted ${matches.length} commands from text:`, matches);
+  }
+  
+  return { extractedCommands, cleanedText };
+}
+
+/**
  * Logs the full response in a nice, boxed format if detailed logging is enabled
  */
 export function logFullResponse(type: string, data: any): void {

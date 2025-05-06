@@ -18,6 +18,13 @@ export type ToolFunction = (appId: string, userId: string, channel: string, args
 
 export type ToolMap = Record<string, ToolFunction>;
 
+export type RTMSessionParams = {
+  enable_rtm?: boolean;
+  agent_rtm_uid?: string;
+  agent_rtm_token?: string;
+  agent_rtm_channel?: string;
+};
+
 export type EndpointConfig = {
   // The RAG data specific to this endpoint
   ragData: Record<string, string>;
@@ -30,4 +37,22 @@ export type EndpointConfig = {
   
   // System message template to use
   systemMessageTemplate: (ragData: Record<string, string>) => string;
+};
+
+export type EndpointRequest = {
+  messages: any[];
+  model?: string;
+  baseURL?: string;
+  stream?: boolean; 
+  channel?: string;
+  userId?: string;
+  appId: string;
+  simplifiedTools?: boolean;
+  stream_options?: any;
+  
+  // RTM parameters
+  enable_rtm?: boolean;
+  agent_rtm_uid?: string;
+  agent_rtm_token?: string;
+  agent_rtm_channel?: string;
 };
