@@ -135,12 +135,15 @@ export function createEndpointHandler(config: EndpointConfig) {
           // Track chunks sent to client for logging
           const completeResponse: any[] = [];
           
-          // Accumulate the full text response for command extraction
+          // Accumulate the full text response for logging
           let accumulatedText = '';
 
           const streamBody = new ReadableStream({
             async start(controller) {
               try {
+                let inCommand = false;        // Flag to track if we're inside a command
+                let commandBuffer = '';       // Buffer to collect command text
+                
                 for await (const part of streamingResponse) {
                   // Skip if controller is closed
                   if (controllerClosed) continue;
@@ -148,12 +151,7 @@ export function createEndpointHandler(config: EndpointConfig) {
                   const chunk = part.choices?.[0];
                   const delta = chunk?.delta;
 
-                  // Accumulate text response for command extraction later
-                  if (delta?.content) {
-                    accumulatedText += delta.content;
-                  }
-
-                  // Merge any partial tool_calls
+                  // Handle tool calls accumulation
                   if (delta?.tool_calls) {
                     for (const tCall of delta.tool_calls) {
                       if (!accumulatedToolCall || (tCall.function?.name && accumulatedToolCall.function?.name && tCall.function.name !== accumulatedToolCall.function.name)) {
@@ -186,21 +184,112 @@ export function createEndpointHandler(config: EndpointConfig) {
                         }
                       }
                     }
+                    
+                    // Store original part for logging
+                    completeResponse.push({
+                      type: "tool_stream",
+                      data: part
+                    });
+                    
+                    // Stream tool calls directly (no need to clean these)
+                    const dataString = `data: ${JSON.stringify(part)}\n\n`;
+                    controller.enqueue(encoder.encode(dataString));
+                    continue;
                   }
-
-                  // Store everything for comprehensive response logging
-                  completeResponse.push({
-                    type: "initial_stream",
-                    data: part
-                  });
-
-                  // Stream current chunk out
-                  const dataString = `data: ${JSON.stringify(part)}\n\n`;
-                  controller.enqueue(encoder.encode(dataString));
+                  
+                  // Handle content with command extraction
+                  if (delta?.content) {
+                    // For logging only
+                    accumulatedText += delta.content;
+                    
+                    // Create a copy of the part that we can modify
+                    const modifiedPart = JSON.parse(JSON.stringify(part));
+                    let modifiedContent = '';
+                    let currentContent = delta.content;
+                    
+                    // Process the content character by character
+                    for (let i = 0; i < currentContent.length; i++) {
+                      const char = currentContent[i];
+                      
+                      if (!inCommand && char === '<') {
+                        // Start of a command - switch to command mode
+                        inCommand = true;
+                        commandBuffer = '<';
+                      } 
+                      else if (inCommand && char === '>') {
+                        // End of a command - process and reset
+                        commandBuffer += '>';
+                        inCommand = false;
+                        
+                        // Send command to RTM if enabled
+                        if (rtmClient && enable_rtm && agent_rtm_channel) {
+                          console.log(`[RTM] Extracted command: ${commandBuffer}`);
+                          await rtmClientManager.sendMessageToChannel(
+                            rtmClient,
+                            agent_rtm_channel,
+                            commandBuffer
+                          );
+                          
+                          // Update RTM last active timestamp
+                          rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
+                        }
+                        
+                        // Reset command buffer
+                        commandBuffer = '';
+                      }
+                      else if (inCommand) {
+                        // In the middle of a command - accumulate to command buffer
+                        commandBuffer += char;
+                      }
+                      else {
+                        // Normal content - add to modified content
+                        modifiedContent += char;
+                      }
+                    }
+                    
+                    // Update the content in the modified part
+                    modifiedPart.choices[0].delta.content = modifiedContent;
+                    
+                    // Only send if there's actual content after modification
+                    if (modifiedContent.length > 0) {
+                      // Store for comprehensive logging
+                      completeResponse.push({
+                        type: "content_stream",
+                        data: modifiedPart
+                      });
+                      
+                      // Stream modified chunk
+                      const dataString = `data: ${JSON.stringify(modifiedPart)}\n\n`;
+                      controller.enqueue(encoder.encode(dataString));
+                    } else {
+                      // Log that we filtered out a chunk
+                      completeResponse.push({
+                        type: "filtered_chunk",
+                        original: part
+                      });
+                    }
+                  }
 
                   // When finish_reason is reached, process tool call only once
                   if (chunk?.finish_reason && !toolExecuted) {
                     toolExecuted = true;
+                    
+                    // If we're in the middle of a command at the end, process it
+                    if (inCommand && commandBuffer.length > 0) {
+                      // Send incomplete command to RTM
+                      if (rtmClient && enable_rtm && agent_rtm_channel) {
+                        console.log(`[RTM] Extracted final command: ${commandBuffer}`);
+                        await rtmClientManager.sendMessageToChannel(
+                          rtmClient,
+                          agent_rtm_channel,
+                          commandBuffer + '>' // Add closing bracket for incomplete command
+                        );
+                        
+                        // Update RTM last active timestamp
+                        rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
+                      }
+                    }
+                    
                     if (accumulatedToolCall) {
                       // Ensure nested function object has a name
                       if (!accumulatedToolCall.function || !accumulatedToolCall.function.name) {
@@ -255,6 +344,10 @@ export function createEndpointHandler(config: EndpointConfig) {
                             tool_call_id: accumulatedToolCall.id
                           });
                           
+                          // Reset for final response
+                          inCommand = false;
+                          commandBuffer = '';
+                          
                           // Final streaming call with updated conversation
                           try {
                             const finalStreamParams: any = {
@@ -277,19 +370,100 @@ export function createEndpointHandler(config: EndpointConfig) {
                               const chunk2 = part2.choices?.[0];
                               const delta2 = chunk2?.delta;
                               
-                              // Accumulate text for command extraction
-                              if (delta2?.content) {
-                                accumulatedText += delta2.content;
+                              // If it's a tool call in the final response, send directly
+                              if (delta2?.tool_calls) {
+                                completeResponse.push({
+                                  type: "final_tool_stream",
+                                  data: part2
+                                });
+                                
+                                const dataString2 = `data: ${JSON.stringify(part2)}\n\n`;
+                                controller.enqueue(encoder.encode(dataString2));
+                                continue;
                               }
                               
-                              // Store for comprehensive logging
-                              completeResponse.push({
-                                type: "final_stream",
-                                data: part2
-                              });
+                              // If it's content in the final response, check for commands
+                              if (delta2?.content) {
+                                // Create a modified copy for the final response
+                                const modifiedPart2 = JSON.parse(JSON.stringify(part2));
+                                let modifiedContent2 = '';
+                                let currentContent2 = delta2.content;
+                                
+                                // Process character by character
+                                for (let i = 0; i < currentContent2.length; i++) {
+                                  const char = currentContent2[i];
+                                  
+                                  if (!inCommand && char === '<') {
+                                    // Start of a command
+                                    inCommand = true;
+                                    commandBuffer = '<';
+                                  } 
+                                  else if (inCommand && char === '>') {
+                                    // End of a command
+                                    commandBuffer += '>';
+                                    inCommand = false;
+                                    
+                                    // Send command to RTM
+                                    if (rtmClient && enable_rtm && agent_rtm_channel) {
+                                      console.log(`[RTM] Extracted command from final response: ${commandBuffer}`);
+                                      await rtmClientManager.sendMessageToChannel(
+                                        rtmClient,
+                                        agent_rtm_channel,
+                                        commandBuffer
+                                      );
+                                      
+                                      rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
+                                    }
+                                    
+                                    // Reset command buffer
+                                    commandBuffer = '';
+                                  }
+                                  else if (inCommand) {
+                                    // Accumulate command text
+                                    commandBuffer += char;
+                                  }
+                                  else {
+                                    // Normal content
+                                    modifiedContent2 += char;
+                                  }
+                                }
+                                
+                                // Update content in the modified part
+                                modifiedPart2.choices[0].delta.content = modifiedContent2;
+                                
+                                // Only send if there's content after modification
+                                if (modifiedContent2.length > 0) {
+                                  completeResponse.push({
+                                    type: "final_content_stream",
+                                    data: modifiedPart2
+                                  });
+                                  
+                                  const dataString2 = `data: ${JSON.stringify(modifiedPart2)}\n\n`;
+                                  controller.enqueue(encoder.encode(dataString2));
+                                } else {
+                                  completeResponse.push({
+                                    type: "final_filtered_chunk",
+                                    original: part2
+                                  });
+                                }
+                              }
                               
-                              const dataString2 = `data: ${JSON.stringify(part2)}\n\n`;
-                              controller.enqueue(encoder.encode(dataString2));
+                              // Check for finish reason in final response
+                              if (chunk2?.finish_reason) {
+                                // Process any remaining command
+                                if (inCommand && commandBuffer.length > 0) {
+                                  if (rtmClient && enable_rtm && agent_rtm_channel) {
+                                    console.log(`[RTM] Extracted final incomplete command: ${commandBuffer}`);
+                                    await rtmClientManager.sendMessageToChannel(
+                                      rtmClient,
+                                      agent_rtm_channel,
+                                      commandBuffer + '>' // Add closing bracket for incomplete command
+                                    );
+                                    
+                                    rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
+                                  }
+                                }
+                              }
                             }
                           } catch (streamErr) {
                             console.error("Error in final response stream:", streamErr);
@@ -306,29 +480,6 @@ export function createEndpointHandler(config: EndpointConfig) {
                             error: `Unknown tool name: ${callName}`
                           });
                         }
-                      }
-                    }
-                    
-                    // Process any commands in the accumulated text
-                    if (rtmClient && enable_rtm && agent_rtm_channel) {
-                      const { extractedCommands, cleanedText } = extractCommands(accumulatedText);
-                      
-                      // Send commands to RTM channel if any were found
-                      if (extractedCommands.length > 0) {
-                        console.log(`[RTM] Extracted ${extractedCommands.length} commands from response`);
-                        for (const cmd of extractedCommands) {
-                          await rtmClientManager.sendMessageToChannel(
-                            rtmClient,
-                            agent_rtm_channel,
-                            cmd
-                          );
-                        }
-                        
-                        // Update the accumulated text to the cleaned version (without commands)
-                        accumulatedText = cleanedText;
-                        
-                        // Update RTM last active timestamp - now passing appId
-                        rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
                       }
                     }
                     
@@ -350,25 +501,18 @@ export function createEndpointHandler(config: EndpointConfig) {
                   }
                 }
                 
-                // Process any commands in the accumulated text (for non-tool case)
-                if (rtmClient && enable_rtm && agent_rtm_channel) {
-                  const { extractedCommands, cleanedText } = extractCommands(accumulatedText);
-                  
-                  // Send commands to RTM channel if any were found
-                  if (extractedCommands.length > 0) {
-                    console.log(`[RTM] Extracted ${extractedCommands.length} commands from response`);
-                    for (const cmd of extractedCommands) {
-                      await rtmClientManager.sendMessageToChannel(
-                        rtmClient,
-                        agent_rtm_channel,
-                        cmd
-                      );
-                    }
+                // Process any remaining command at the end
+                if (inCommand && commandBuffer.length > 0) {
+                  // Send incomplete command to RTM
+                  if (rtmClient && enable_rtm && agent_rtm_channel) {
+                    console.log(`[RTM] Extracted final command: ${commandBuffer}`);
+                    await rtmClientManager.sendMessageToChannel(
+                      rtmClient,
+                      agent_rtm_channel,
+                      commandBuffer + '>' // Add closing bracket for incomplete command
+                    );
                     
-                    // Update the accumulated text to the cleaned version (without commands)
-                    accumulatedText = cleanedText;
-                    
-                    // Update RTM last active timestamp - now passing appId
+                    // Update RTM last active timestamp
                     rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
                   }
                 }
@@ -451,6 +595,9 @@ export function createEndpointHandler(config: EndpointConfig) {
           });
 
           finalResp = passResponse;
+
+          console.log('finalResp',finalResp);
+
           const firstChoice = passResponse?.choices?.[0];
           if (!firstChoice) {
             console.log('[Non-Stream] No choices returned; stopping.');
@@ -510,19 +657,46 @@ export function createEndpointHandler(config: EndpointConfig) {
 
         // Extract commands from the final response text (if RTM is enabled)
         if (rtmClient && enable_rtm && agent_rtm_channel && accumulatedText) {
-          const { extractedCommands, cleanedText } = extractCommands(accumulatedText);
+          let cleanedText = '';
+          let inCommand = false;
+          let commandBuffer = '';
+          const commands = [];
           
-          /*
-          await rtmClientManager.sendMessageToChannel(
-            rtmClient,
-            agent_rtm_channel,
-            "BALLSACK"
-          ); */
-
-          // Send commands to RTM channel if any were found
-          if (extractedCommands.length > 0) {
-            console.log(`[RTM] Extracted ${extractedCommands.length} commands from non-streaming response`);
-            for (const cmd of extractedCommands) {
+          // Process character by character to extract commands
+          for (let i = 0; i < accumulatedText.length; i++) {
+            const char = accumulatedText[i];
+            
+            if (!inCommand && char === '<') {
+              // Start of a command
+              inCommand = true;
+              commandBuffer = '<';
+            }
+            else if (inCommand && char === '>') {
+              // End of a command
+              commandBuffer += '>';
+              commands.push(commandBuffer);
+              inCommand = false;
+              commandBuffer = '';
+            }
+            else if (inCommand) {
+              // Add to command buffer
+              commandBuffer += char;
+            }
+            else {
+              // Normal text
+              cleanedText += char;
+            }
+          }
+          
+          // Process any remaining command buffer
+          if (inCommand && commandBuffer.length > 0) {
+            commands.push(commandBuffer + '>'); // Add closing bracket for incomplete command
+          }
+          
+          // Send commands to RTM
+          if (commands.length > 0) {
+            console.log(`[RTM] Extracted ${commands.length} commands from non-streaming response`);
+            for (const cmd of commands) {
               await rtmClientManager.sendMessageToChannel(
                 rtmClient,
                 agent_rtm_channel,
@@ -530,12 +704,12 @@ export function createEndpointHandler(config: EndpointConfig) {
               );
             }
             
-            // Update the response with the cleaned text
+            // Update the response with cleaned text
             if (finalResp?.choices?.[0]?.message?.content) {
               finalResp.choices[0].message.content = cleanedText;
             }
             
-            // Update RTM last active timestamp - now passing appId
+            // Update RTM last active timestamp
             rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
           }
         }
@@ -543,7 +717,13 @@ export function createEndpointHandler(config: EndpointConfig) {
         // Log the complete non-streaming response
         logFullResponse("NON-STREAM", finalResp);
         
-        return NextResponse.json(finalResp, { status: 200 });
+        // Use direct Response instead of NextResponse.json() for more control
+        return new Response(JSON.stringify(finalResp), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
       }
     } catch (error: unknown) {
       console.error("Chat Completions Error:", error);

@@ -291,7 +291,7 @@ class RTMClientManager {
       };
 
       logRtm(`Sending command to channel ${channelName}:`, message);
-      await rtmClient.publish(channelName, JSON.stringify(payload));
+      await rtmClient.publish(channelName, message);// JSON.stringify(payload));
       logRtm(`Command sent successfully`);
       return true;
     } catch (error) {
