@@ -6,7 +6,7 @@ import type { ToolResponseCacheItem } from '../types';
 // Configuration options
 export const CONFIG = {
   // Set to false to disable detailed response logging (reduces console output)
-  enableDetailedResponseLogging: true,
+  enableDetailedResponseLogging: false, // CHANGED: Set to false by default for quieter logs
   // Cache expiration time in milliseconds (24 hours)
   cacheExpirationMs: 86400000,
   // Interval for cleaning up expired cache entries (1 minute)

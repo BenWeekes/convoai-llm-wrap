@@ -19,7 +19,21 @@ export async function sendPeerMessage(
   toUser: string, 
   payload: string
 ): Promise<boolean> {
+  console.log(`📤 sendPeerMessage called with:`, {
+    appId,
+    fromUser,
+    toUser,
+    payloadLength: payload.length
+  });
+
+  // Check required environment variables
+  if (!process.env.REST_API_TOKEN) {
+    console.error('❌ REST_API_TOKEN environment variable is missing');
+    return false;
+  }
+
   const url = `https://api.agora.io/dev/v2/project/${appId}/rtm/users/${fromUser}/peer_messages`;
+  console.log(`📤 Request URL:`, url);
   
   const data = {
     destination: String(toUser),
@@ -29,16 +43,29 @@ export async function sendPeerMessage(
   };
 
   try {
+    console.log(`📤 Making request with data:`, data);
+    console.log(`📤 Using REST_API_TOKEN (first 10 chars):`, process.env.REST_API_TOKEN?.substring(0, 10) + '...');
+    
     const response = await axios.post(url, data, {
       headers: {
         Authorization: 'Basic ' + process.env.REST_API_TOKEN,
         'Content-Type': 'application/json'
       }
     });
-    console.log('sendPeerMessage response:', response.data);
+    
+    console.log('✅ sendPeerMessage response status:', response.status);
+    console.log('✅ sendPeerMessage response data:', response.data);
     return true;
-  } catch (error) {
-    console.error('Error sending peer message:', error);
+  } catch (error: any) {
+    console.error('❌ Error sending peer message:', error.message);
+    if (error.response) {
+      console.error('❌ Response status:', error.response.status);
+      console.error('❌ Response data:', error.response.data);
+      console.error('❌ Response headers:', error.response.headers);
+    }
+    if (error.request) {
+      console.error('❌ Request that was made:', error.request);
+    }
     return false;
   }
 }
@@ -58,6 +85,19 @@ export async function sendPhotoMessage(
   toUser: string,
   photoType: string = "default"
 ): Promise<boolean> {
+  console.log(`📸 sendPhotoMessage called with:`, {
+    appId,
+    fromUser,
+    toUser,
+    photoType
+  });
+
+  // Check required environment variables
+  if (!process.env.REST_API_TOKEN) {
+    console.error('❌ REST_API_TOKEN environment variable is missing');
+    return false;
+  }
+
   // Map different photo types to different placeholder images
   let imageUrl = "https://sa-utils.agora.io/mms/kierap.png";
   
@@ -73,6 +113,14 @@ export async function sendPhotoMessage(
   }*/
   
   const payload = JSON.stringify({ img: imageUrl });
+  console.log(`📸 Sending photo payload:`, payload);
   
-  return sendPeerMessage(appId, fromUser, toUser, payload);
+  try {
+    const result = await sendPeerMessage(appId, fromUser, toUser, payload);
+    console.log(`📸 sendPhotoMessage result:`, result);
+    return result;
+  } catch (error) {
+    console.error('📸 sendPhotoMessage error:', error);
+    return false;
+  }
 }

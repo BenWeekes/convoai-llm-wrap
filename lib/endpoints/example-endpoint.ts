@@ -69,38 +69,96 @@ const EXAMPLE_TOOLS: OpenAI.ChatCompletionTool[] = [
   }
 ];
 
-// Implement the tool functions
+// Implement the tool functions with enhanced logging
 function order_sandwich(appId: string, userId: string, channel: string, args: any): string {
   const filling = args.filling || "Unknown";
   
-  console.log(`Placing sandwich order for ${userId} in ${channel} with filling: ${filling}`);
+  console.log(`🥪 SANDWICH TOOL CALLED:`, { appId, userId, channel, filling });
+  console.log(`🥪 Placing sandwich order for ${userId} in ${channel} with filling: ${filling}`);
   
-  return `Sandwich ordered with ${filling}. It will arrive at 3pm. Enjoy!`;
+  const result = `Sandwich ordered with ${filling}. It will arrive at 3pm. Enjoy!`;
+  console.log(`🥪 SANDWICH TOOL RESULT:`, result);
+  
+  return result;
 }
 
 async function send_photo(appId: string, userId: string, channel: string, args: any): Promise<string> {
   const subject = args.subject || "default";
-  console.log(`Sending ${subject} photo to ${userId} in ${channel}`);
   
-  const success = await sendPhotoMessage(
-    appId, 
-    process.env.RTM_FROM_USER as string, 
-    userId,
-    subject
-  );
+  console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject });
+  console.log(`📸 Sending ${subject} photo to ${userId} in ${channel}`);
   
-  if (success) {
-    return `Photo of ${subject} sent successfully. You should receive it momentarily.`;
-  } else {
-    return `We encountered an issue sending the ${subject} photo. Please try again later.`;
+  // Check environment variables
+  const fromUser = process.env.RTM_FROM_USER;
+  if (!fromUser) {
+    console.error('📸 ERROR: RTM_FROM_USER environment variable is not set');
+    return `Failed to send photo: Missing RTM_FROM_USER configuration.`;
+  }
+  
+  if (!appId) {
+    console.error('📸 ERROR: appId is missing');
+    return `Failed to send photo: Missing appId.`;
+  }
+  
+  console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}`);
+  
+  try {
+    const success = await sendPhotoMessage(
+      appId, 
+      fromUser, 
+      userId,
+      subject
+    );
+    
+    let result: string;
+    if (success) {
+      result = `Photo of ${subject} sent successfully. You should receive it momentarily.`;
+      console.log(`📸 SUCCESS: ${result}`);
+    } else {
+      result = `We encountered an issue sending the ${subject} photo. Please try again later.`;
+      console.log(`📸 FAILURE: ${result}`);
+    }
+    
+    console.log(`📸 PHOTO TOOL RESULT:`, result);
+    return result;
+  } catch (error) {
+    console.error(`📸 PHOTO TOOL ERROR:`, error);
+    const errorResult = `Error sending photo: ${error instanceof Error ? error.message : 'Unknown error'}`;
+    console.log(`📸 PHOTO TOOL ERROR RESULT:`, errorResult);
+    return errorResult;
   }
 }
 
-// Create the tool map
+// Create the tool map with debug wrappers
 const EXAMPLE_TOOL_MAP = {
-  order_sandwich,
-  send_photo
+  order_sandwich: (appId: string, userId: string, channel: string, args: any) => {
+    console.log(`🔧 TOOL MAP: order_sandwich wrapper called`);
+    try {
+      const result = order_sandwich(appId, userId, channel, args);
+      console.log(`🔧 TOOL MAP: order_sandwich wrapper completed successfully`);
+      return result;
+    } catch (error) {
+      console.error(`🔧 TOOL MAP: order_sandwich wrapper error:`, error);
+      throw error;
+    }
+  },
+  send_photo: async (appId: string, userId: string, channel: string, args: any) => {
+    console.log(`🔧 TOOL MAP: send_photo wrapper called`);
+    try {
+      const result = await send_photo(appId, userId, channel, args);
+      console.log(`🔧 TOOL MAP: send_photo wrapper completed successfully`);
+      return result;
+    } catch (error) {
+      console.error(`🔧 TOOL MAP: send_photo wrapper error:`, error);
+      throw error;
+    }
+  }
 };
+
+// Debug logging at module load time
+console.log('🔧 Example endpoint tool map configured with tools:', Object.keys(EXAMPLE_TOOL_MAP));
+console.log('🔧 send_photo function type:', typeof EXAMPLE_TOOL_MAP.send_photo);
+console.log('🔧 order_sandwich function type:', typeof EXAMPLE_TOOL_MAP.order_sandwich);
 
 // Export the complete endpoint configuration
 export const exampleEndpointConfig: EndpointConfig = {

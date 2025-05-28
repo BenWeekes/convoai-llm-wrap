@@ -26,7 +26,7 @@ export type RTMClientParams = {
 
 // Simplified logging function
 function logRtm(message: string, ...args: any[]) {
-  console.log(`[RTM] ${message}`, ...args);
+  //console.log(`[RTMx] ${message}`, ...args);
 }
 
 // Client manager that handles multiple RTM connections

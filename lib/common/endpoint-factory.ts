@@ -14,6 +14,192 @@ import rtmClientManager, { RTMClientParams } from './rtm-client-manager';
 const DEFAULT_CHUNK_SIZE = 4096;
 
 /**
+ * Helper function to execute tool and handle final response
+ */
+async function executeToolCall(
+  accumulatedToolCall: any,
+  config: EndpointConfig,
+  appId: string,
+  userId: string,
+  channel: string,
+  finalMessages: any[],
+  openai: OpenAI,
+  model: string,
+  simplifiedTools: boolean,
+  completeResponse: any[],
+  controller: ReadableStreamDefaultController,
+  encoder: TextEncoder,
+  rtmClient: any,
+  enable_rtm: boolean,
+  agent_rtm_channel: string
+): Promise<void> {
+  console.log(`🚀 EXECUTING TOOL CALL - all conditions met`);
+  
+  const callName = accumulatedToolCall.function.name;
+  const callArgsStr = accumulatedToolCall.function.arguments || "{}";
+  const fn = config.toolMap[callName];
+  
+  console.log(`🔧 TOOL EXECUTION DEBUG:`);
+  console.log(`- Tool name: ${callName}`);
+  console.log(`- Args string: ${callArgsStr}`);
+  console.log(`- Function exists: ${!!fn}`);
+  console.log(`- Available tools:`, Object.keys(config.toolMap));
+  
+  if (!fn) {
+    console.error(`❌ Unknown tool name: ${callName}`);
+    return;
+  }
+  
+  let parsedArgs: any = {};
+  try {
+    parsedArgs = safeJSONParse(callArgsStr);
+    console.log(`- Parsed args:`, parsedArgs);
+  } catch (err) {
+    console.error("❌ Failed to parse tool call arguments:", err);
+    return;
+  }
+  
+  console.log(`🚀 Calling ${callName} for ${userId} in ${channel}`);
+  
+  try {
+    // Execute the tool function
+    const toolResult = await fn(appId, userId, channel, parsedArgs);
+    console.log(`✅ Tool result for ${callName}:`, toolResult);
+
+    // Store the tool response in the cache
+    storeToolResponse(accumulatedToolCall.id, callName, toolResult);
+    console.log(`💾 Cached tool response for call ID: ${accumulatedToolCall.id}`);
+    
+    // Store tool execution in the response log
+    completeResponse.push({
+      type: "tool_execution",
+      tool_name: callName,
+      arguments: parsedArgs,
+      result: toolResult
+    });
+    
+    // Create updated messages with tool call and result
+    const updatedMessages = [
+      ...finalMessages,
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [accumulatedToolCall]
+      },
+      {
+        role: "tool",
+        name: callName,
+        content: toolResult,
+        tool_call_id: accumulatedToolCall.id
+      }
+    ];
+    
+    // Make final streaming request
+    const finalStreamParams: any = {
+      model,
+      messages: updatedMessages,
+      stream: true
+    };
+
+    if (!simplifiedTools) {
+      finalStreamParams.tools = config.tools;
+      finalStreamParams.tool_choice = "auto";
+    }
+
+    console.log(`🔄 Making final stream request with ${updatedMessages.length} messages`);
+    const finalResponse = await handleModelRequest(openai, finalStreamParams);
+    
+    // Stream the final response
+    for await (const part2 of finalResponse) {
+      const chunk2 = part2.choices?.[0];
+      const delta2 = chunk2?.delta;
+      
+      if (delta2?.content) {
+        // Process content and extract commands
+        const modifiedPart2 = JSON.parse(JSON.stringify(part2));
+        let modifiedContent2 = '';
+        let currentContent2 = delta2.content;
+        let inCommand = false;
+        let commandBuffer = '';
+        
+        // Process character by character for command extraction
+        for (let i = 0; i < currentContent2.length; i++) {
+          const char = currentContent2[i];
+          
+          if (!inCommand && char === '<') {
+            inCommand = true;
+            commandBuffer = '<';
+          } 
+          else if (inCommand && char === '>') {
+            commandBuffer += '>';
+            inCommand = false;
+            
+            // Send command to RTM
+            if (rtmClient && enable_rtm && agent_rtm_channel) {
+              console.log(`[RTM] Extracted command from final response: ${commandBuffer}`);
+              await rtmClientManager.sendMessageToChannel(
+                rtmClient,
+                agent_rtm_channel,
+                commandBuffer
+              );
+              rtmClientManager.updateLastActive(appId, userId, agent_rtm_channel);
+            }
+            
+            commandBuffer = '';
+          }
+          else if (inCommand) {
+            commandBuffer += char;
+          }
+          else {
+            modifiedContent2 += char;
+          }
+        }
+        
+        // Update content and send if not empty
+        modifiedPart2.choices[0].delta.content = modifiedContent2;
+        
+        if (modifiedContent2.length > 0) {
+          completeResponse.push({
+            type: "final_content_stream",
+            data: modifiedPart2
+          });
+          
+          const dataString2 = `data: ${JSON.stringify(modifiedPart2)}\n\n`;
+          controller.enqueue(encoder.encode(dataString2));
+        }
+      }
+    }
+  } catch (toolError) {
+    console.error(`❌ Error executing tool ${callName}:`, toolError);
+    const errorResult = `Error executing ${callName}: ${toolError instanceof Error ? toolError.message : 'Unknown error'}`;
+    storeToolResponse(accumulatedToolCall.id, callName, errorResult);
+  }
+}
+
+/**
+ * Helper function to end the stream properly
+ */
+function endStream(
+  controller: ReadableStreamDefaultController,
+  encoder: TextEncoder,
+  completeResponse: any[],
+  logType: string,
+  controllerClosed: { value: boolean }
+): void {
+  if (controllerClosed.value) return;
+  
+  const doneString = `data: [DONE]\n\n`;
+  controller.enqueue(encoder.encode(doneString));
+  completeResponse.push({
+    type: "stream_end",
+    marker: "[DONE]"
+  });
+  controllerClosed.value = true;
+  controller.close();
+  logFullResponse(logType, completeResponse);
+}
+
+/**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
  */
 export function createEndpointHandler(config: EndpointConfig) {
@@ -34,11 +220,11 @@ export function createEndpointHandler(config: EndpointConfig) {
         model = 'gpt-4o-mini',
         baseURL = 'https://api.openai.com/v1',
         apiKey = process.env.OPENAI_API_KEY,
-        stream = true, // boolean
+        stream = true,
         channel = 'ccc',
         userId = '111',
         appId = '',
-        simplifiedTools = false, // New parameter to toggle simple tool handling
+        simplifiedTools = false,
         stream_options = {},
         // RTM parameters
         enable_rtm = false,
@@ -47,13 +233,13 @@ export function createEndpointHandler(config: EndpointConfig) {
         agent_rtm_channel = ''
       } = body || {};
 
-      // Gather RTM parameters, including appId from request
+      // Gather RTM parameters
       const rtmParams: RTMClientParams = {
         enable_rtm,
         agent_rtm_uid,
         agent_rtm_token,
         agent_rtm_channel,
-        appId    // Pass the appId from the request
+        appId
       };
 
       // Initialize RTM if enabled
@@ -63,7 +249,6 @@ export function createEndpointHandler(config: EndpointConfig) {
       console.log('Request body:');
       console.dir(body, { depth: null, colors: true });
       
-      // Log the current state of the cache
       logCacheState();
       
       if (!messages || !Array.isArray(messages)) {
@@ -103,7 +288,7 @@ export function createEndpointHandler(config: EndpointConfig) {
       // Common request parameters
       const commonRequestParams: any = {
         model,
-        stream: false
+        stream: false // Initial request is non-streaming to detect tool calls
       };
 
       // Add tools if not using simplified tool handling
@@ -112,7 +297,8 @@ export function createEndpointHandler(config: EndpointConfig) {
         commonRequestParams.tool_choice = "auto";
       }
 
-      console.info('stream', stream);
+      console.info('🔄 Request stream parameter:', stream);
+      console.info('🔧 Common request params (stream=false for tool detection):');
       console.dir(commonRequestParams, { depth: null, colors: true });
 
       // F) Handle the request based on streaming preference
@@ -129,30 +315,33 @@ export function createEndpointHandler(config: EndpointConfig) {
 
           // We'll merge partial tool call fragments into a single object.
           let accumulatedToolCall: any = null;
-          let toolExecuted = false; // ensure we process the tool only once
-          let controllerClosed = false; // Flag to track if controller is closed
+          let toolExecuted = false;
+          const controllerClosed = { value: false };
           
           // Track chunks sent to client for logging
           const completeResponse: any[] = [];
           
-          // Accumulate the full text response for logging
-          let accumulatedText = '';
-
           const streamBody = new ReadableStream({
             async start(controller) {
               try {
-                let inCommand = false;        // Flag to track if we're inside a command
-                let commandBuffer = '';       // Buffer to collect command text
+                let inCommand = false;
+                let commandBuffer = '';
                 
                 for await (const part of streamingResponse) {
-                  // Skip if controller is closed
-                  if (controllerClosed) continue;
+                  if (controllerClosed.value) continue;
                   
                   const chunk = part.choices?.[0];
                   const delta = chunk?.delta;
 
+                  // Only log important chunks to reduce noise
+                  if (chunk?.finish_reason || delta?.tool_calls) {
+                    console.log(`📦 Processing chunk - finish_reason: ${chunk?.finish_reason}, has_tool_calls: ${!!delta?.tool_calls}, has_content: ${!!delta?.content}`);
+                  }
+
                   // Handle tool calls accumulation
                   if (delta?.tool_calls) {
+                    console.log(`🔧 TOOL CALL DETECTED:`, delta.tool_calls);
+                    
                     for (const tCall of delta.tool_calls) {
                       if (!accumulatedToolCall || (tCall.function?.name && accumulatedToolCall.function?.name && tCall.function.name !== accumulatedToolCall.function.name)) {
                         accumulatedToolCall = tCall;
@@ -169,7 +358,7 @@ export function createEndpointHandler(config: EndpointConfig) {
                           accumulatedToolCall.function = {};
                         }
                       } else {
-                        // Otherwise merge fragments
+                        // Merge fragments
                         if (tCall.function) {
                           if (tCall.function.name) {
                             accumulatedToolCall.function.name = tCall.function.name;
@@ -185,13 +374,15 @@ export function createEndpointHandler(config: EndpointConfig) {
                       }
                     }
                     
+                    console.log(`🔧 ACCUMULATED TOOL CALL:`, accumulatedToolCall);
+                    
                     // Store original part for logging
                     completeResponse.push({
                       type: "tool_stream",
                       data: part
                     });
                     
-                    // Stream tool calls directly (no need to clean these)
+                    // Stream tool calls directly
                     const dataString = `data: ${JSON.stringify(part)}\n\n`;
                     controller.enqueue(encoder.encode(dataString));
                     continue;
@@ -199,9 +390,6 @@ export function createEndpointHandler(config: EndpointConfig) {
                   
                   // Handle content with command extraction
                   if (delta?.content) {
-                    // For logging only
-                    accumulatedText += delta.content;
-                    
                     // Create a copy of the part that we can modify
                     const modifiedPart = JSON.parse(JSON.stringify(part));
                     let modifiedContent = '';
@@ -212,12 +400,10 @@ export function createEndpointHandler(config: EndpointConfig) {
                       const char = currentContent[i];
                       
                       if (!inCommand && char === '<') {
-                        // Start of a command - switch to command mode
                         inCommand = true;
                         commandBuffer = '<';
                       } 
                       else if (inCommand && char === '>') {
-                        // End of a command - process and reset
                         commandBuffer += '>';
                         inCommand = false;
                         
@@ -229,20 +415,15 @@ export function createEndpointHandler(config: EndpointConfig) {
                             agent_rtm_channel,
                             commandBuffer
                           );
-                          
-                          // Update RTM last active timestamp
                           rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
                         }
                         
-                        // Reset command buffer
                         commandBuffer = '';
                       }
                       else if (inCommand) {
-                        // In the middle of a command - accumulate to command buffer
                         commandBuffer += char;
                       }
                       else {
-                        // Normal content - add to modified content
                         modifiedContent += char;
                       }
                     }
@@ -252,17 +433,14 @@ export function createEndpointHandler(config: EndpointConfig) {
                     
                     // Only send if there's actual content after modification
                     if (modifiedContent.length > 0) {
-                      // Store for comprehensive logging
                       completeResponse.push({
                         type: "content_stream",
                         data: modifiedPart
                       });
                       
-                      // Stream modified chunk
                       const dataString = `data: ${JSON.stringify(modifiedPart)}\n\n`;
                       controller.enqueue(encoder.encode(dataString));
                     } else {
-                      // Log that we filtered out a chunk
                       completeResponse.push({
                         type: "filtered_chunk",
                         original: part
@@ -270,285 +448,90 @@ export function createEndpointHandler(config: EndpointConfig) {
                     }
                   }
 
-                  // When finish_reason is reached, process tool call only once
+                  // FIXED: Process finish_reason and check for accumulated tool calls
                   if (chunk?.finish_reason && !toolExecuted) {
-                    toolExecuted = true;
+                    console.log(`🏁 FINISH REASON DETECTED: ${chunk.finish_reason}`);
+                    console.log(`🔧 Checking for accumulated tool call: ${!!accumulatedToolCall}`);
                     
-                    // If we're in the middle of a command at the end, process it
-                    if (inCommand && commandBuffer.length > 0) {
-                      // Send incomplete command to RTM
-                      if (rtmClient && enable_rtm && agent_rtm_channel) {
-                        console.log(`[RTM] Extracted final command: ${commandBuffer}`);
-                        await rtmClientManager.sendMessageToChannel(
-                          rtmClient,
-                          agent_rtm_channel,
-                          commandBuffer + '>' // Add closing bracket for incomplete command
-                        );
-                        
-                        // Update RTM last active timestamp
-                        rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
-                      }
-                    }
-                    
-                    if (accumulatedToolCall) {
-                      // Ensure nested function object has a name
-                      if (!accumulatedToolCall.function || !accumulatedToolCall.function.name) {
-                        console.error("Accumulated tool call is missing function.name.");
-                      } else {
-                        const callName = accumulatedToolCall.function.name;
-                        const callArgsStr = accumulatedToolCall.function.arguments || "{}";
-                        const fn = config.toolMap[callName];
-                        if (fn) {
-                          let parsedArgs: any = {};
-                          try {
-                            parsedArgs = safeJSONParse(callArgsStr);
-                          } catch (err) {
-                            console.error("Failed to parse tool call arguments:", err);
-                          }
-                          console.log(
-                            `Calling ${callName} for ${userId} in ${channel} with args:`,
-                            JSON.stringify(parsedArgs)
+                    if (accumulatedToolCall && accumulatedToolCall.function && accumulatedToolCall.function.name) {
+                      console.log(`🎯 EXECUTING ACCUMULATED TOOL CALL`);
+                      toolExecuted = true;
+                      
+                      await executeToolCall(
+                        accumulatedToolCall,
+                        config,
+                        appId,
+                        userId,
+                        channel,
+                        finalMessages,
+                        openai,
+                        model,
+                        simplifiedTools,
+                        completeResponse,
+                        controller,
+                        encoder,
+                        rtmClient,
+                        enable_rtm,
+                        agent_rtm_channel
+                      );
+                      
+                      endStream(controller, encoder, completeResponse, "STREAM WITH TOOL", controllerClosed);
+                      return;
+                    } else {
+                      console.log(`🤷 No accumulated tool call to execute`);
+                      toolExecuted = true;
+                      
+                      // Process any pending commands
+                      if (inCommand && commandBuffer.length > 0) {
+                        if (rtmClient && enable_rtm && agent_rtm_channel) {
+                          console.log(`[RTM] Extracted final command: ${commandBuffer}`);
+                          await rtmClientManager.sendMessageToChannel(
+                            rtmClient,
+                            agent_rtm_channel,
+                            commandBuffer + '>'
                           );
-                          
-                          // Append an assistant message with valid tool_calls
-                          const updatedMessages = [
-                            ...finalMessages,
-                            {
-                              role: "assistant",
-                              content: "",
-                              tool_calls: [accumulatedToolCall]
-                            }
-                          ];
-                          
-                          // Execute the tool function
-                          const toolResult = await fn(appId, userId, channel, parsedArgs);
-                          console.log(`Tool result: ${toolResult}`);
-
-                          // Store the tool response in the cache
-                          storeToolResponse(accumulatedToolCall.id, callName, toolResult);
-                          console.log(`Cached tool response for call ID: ${accumulatedToolCall.id}`);
-                          
-                          // Store tool execution in the response log
-                          completeResponse.push({
-                            type: "tool_execution",
-                            tool_name: callName,
-                            arguments: parsedArgs,
-                            result: toolResult
-                          });
-                          
-                          // Append a tool message referencing the same call id
-                          updatedMessages.push({
-                            role: "tool",
-                            name: callName,
-                            content: toolResult,
-                            tool_call_id: accumulatedToolCall.id
-                          });
-                          
-                          // Reset for final response
-                          inCommand = false;
-                          commandBuffer = '';
-                          
-                          // Final streaming call with updated conversation
-                          try {
-                            const finalStreamParams: any = {
-                              model,
-                              messages: updatedMessages,
-                              stream: true
-                            };
-
-                            // Add tools if not using simplified tools
-                            if (!simplifiedTools) {
-                              finalStreamParams.tools = config.tools;
-                              finalStreamParams.tool_choice = "auto";
-                            }
-
-                            const finalResponse = await handleModelRequest(openai, finalStreamParams);
-                            
-                            for await (const part2 of finalResponse) {
-                              if (controllerClosed) break; // Skip if controller is closed
-                              
-                              const chunk2 = part2.choices?.[0];
-                              const delta2 = chunk2?.delta;
-                              
-                              // If it's a tool call in the final response, send directly
-                              if (delta2?.tool_calls) {
-                                completeResponse.push({
-                                  type: "final_tool_stream",
-                                  data: part2
-                                });
-                                
-                                const dataString2 = `data: ${JSON.stringify(part2)}\n\n`;
-                                controller.enqueue(encoder.encode(dataString2));
-                                continue;
-                              }
-                              
-                              // If it's content in the final response, check for commands
-                              if (delta2?.content) {
-                                // Create a modified copy for the final response
-                                const modifiedPart2 = JSON.parse(JSON.stringify(part2));
-                                let modifiedContent2 = '';
-                                let currentContent2 = delta2.content;
-                                
-                                // Process character by character
-                                for (let i = 0; i < currentContent2.length; i++) {
-                                  const char = currentContent2[i];
-                                  
-                                  if (!inCommand && char === '<') {
-                                    // Start of a command
-                                    inCommand = true;
-                                    commandBuffer = '<';
-                                  } 
-                                  else if (inCommand && char === '>') {
-                                    // End of a command
-                                    commandBuffer += '>';
-                                    inCommand = false;
-                                    
-                                    // Send command to RTM
-                                    if (rtmClient && enable_rtm && agent_rtm_channel) {
-                                      console.log(`[RTM] Extracted command from final response: ${commandBuffer}`);
-                                      await rtmClientManager.sendMessageToChannel(
-                                        rtmClient,
-                                        agent_rtm_channel,
-                                        commandBuffer
-                                      );
-                                      
-                                      rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
-                                    }
-                                    
-                                    // Reset command buffer
-                                    commandBuffer = '';
-                                  }
-                                  else if (inCommand) {
-                                    // Accumulate command text
-                                    commandBuffer += char;
-                                  }
-                                  else {
-                                    // Normal content
-                                    modifiedContent2 += char;
-                                  }
-                                }
-                                
-                                // Update content in the modified part
-                                modifiedPart2.choices[0].delta.content = modifiedContent2;
-                                
-                                // Only send if there's content after modification
-                                if (modifiedContent2.length > 0) {
-                                  completeResponse.push({
-                                    type: "final_content_stream",
-                                    data: modifiedPart2
-                                  });
-                                  
-                                  const dataString2 = `data: ${JSON.stringify(modifiedPart2)}\n\n`;
-                                  controller.enqueue(encoder.encode(dataString2));
-                                } else {
-                                  completeResponse.push({
-                                    type: "final_filtered_chunk",
-                                    original: part2
-                                  });
-                                }
-                              }
-                              
-                              // Check for finish reason in final response
-                              if (chunk2?.finish_reason) {
-                                // Process any remaining command
-                                if (inCommand && commandBuffer.length > 0) {
-                                  if (rtmClient && enable_rtm && agent_rtm_channel) {
-                                    console.log(`[RTM] Extracted final incomplete command: ${commandBuffer}`);
-                                    await rtmClientManager.sendMessageToChannel(
-                                      rtmClient,
-                                      agent_rtm_channel,
-                                      commandBuffer + '>' // Add closing bracket for incomplete command
-                                    );
-                                    
-                                    rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
-                                  }
-                                }
-                              }
-                            }
-                          } catch (streamErr) {
-                            console.error("Error in final response stream:", streamErr);
-                            completeResponse.push({
-                              type: "error",
-                              source: "final_stream",
-                              error: streamErr instanceof Error ? streamErr.message : "Unknown error"
-                            });
-                          }
-                        } else {
-                          console.error("Unknown tool name:", callName);
-                          completeResponse.push({
-                            type: "error",
-                            error: `Unknown tool name: ${callName}`
-                          });
+                          rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
                         }
                       }
-                    }
-                    
-                    // End SSE - make sure we only do this once
-                    if (!controllerClosed) {
-                      const doneString = `data: [DONE]\n\n`;
-                      controller.enqueue(encoder.encode(doneString));
-                      completeResponse.push({
-                        type: "stream_end",
-                        marker: "[DONE]"
-                      });
-                      controllerClosed = true;
-                      controller.close();
                       
-                      // Log the complete response
-                      logFullResponse("STREAM WITH TOOL", completeResponse);
+                      endStream(controller, encoder, completeResponse, "STREAM WITHOUT TOOL", controllerClosed);
+                      return;
                     }
-                    return;
                   }
                 }
                 
-                // Process any remaining command at the end
+                // End of stream reached without finish_reason
+                console.log(`🏁 END OF STREAM - no finish_reason detected`);
+                
+                // Process any remaining command
                 if (inCommand && commandBuffer.length > 0) {
-                  // Send incomplete command to RTM
                   if (rtmClient && enable_rtm && agent_rtm_channel) {
                     console.log(`[RTM] Extracted final command: ${commandBuffer}`);
                     await rtmClientManager.sendMessageToChannel(
                       rtmClient,
                       agent_rtm_channel,
-                      commandBuffer + '>' // Add closing bracket for incomplete command
+                      commandBuffer + '>'
                     );
-                    
-                    // Update RTM last active timestamp
                     rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
                   }
                 }
                 
-                // Normal end of stream if no tool call was processed
-                if (!controllerClosed) {
-                  const doneString = `data: [DONE]\n\n`;
-                  controller.enqueue(encoder.encode(doneString));
-                  completeResponse.push({
-                    type: "stream_end",
-                    marker: "[DONE]"
-                  });
-                  controllerClosed = true;
-                  controller.close();
-                  
-                  // Log the complete response
-                  logFullResponse("STREAM WITHOUT TOOL", completeResponse);
-                }
+                endStream(controller, encoder, completeResponse, "STREAM WITHOUT TOOL", controllerClosed);
+                
               } catch (error) {
-                console.error("OpenAI streaming error:", error);
-                // Only try to send an error if the controller isn't closed
-                if (!controllerClosed) {
+                console.error("❌ OpenAI streaming error:", error);
+                if (!controllerClosed.value) {
                   try {
                     const errorMessage = error instanceof Error ? error.message : "Unknown streaming error";
-                    const errorData = { error: errorMessage };
                     completeResponse.push({
                       type: "error",
                       error: errorMessage
                     });
                     controller.error(error);
-                    controllerClosed = true;
-                    
-                    // Log the error response
+                    controllerClosed.value = true;
                     logFullResponse("STREAM ERROR", completeResponse);
                   } catch (controllerErr) {
-                    console.error("Error while sending error to controller:", controllerErr);
+                    console.error("❌ Error while sending error to controller:", controllerErr);
                   }
                 }
               }
@@ -565,11 +548,10 @@ export function createEndpointHandler(config: EndpointConfig) {
           
           return response;
         } catch (error) {
-          console.error("Stream setup error:", error);
+          console.error("❌ Stream setup error:", error);
           const errorMessage = error instanceof Error ? error.message : "Unknown streaming setup error";
           const errorResponse = { error: errorMessage };
           
-          // Log the error response
           logFullResponse("STREAM SETUP ERROR", errorResponse);
           
           return NextResponse.json(errorResponse, { status: 500 });
@@ -596,8 +578,6 @@ export function createEndpointHandler(config: EndpointConfig) {
 
           finalResp = passResponse;
 
-          console.log('finalResp',finalResp);
-
           const firstChoice = passResponse?.choices?.[0];
           if (!firstChoice) {
             console.log('[Non-Stream] No choices returned; stopping.');
@@ -622,31 +602,56 @@ export function createEndpointHandler(config: EndpointConfig) {
 
             const fn = config.toolMap[callName];
             if (!fn) {
-              console.error('[Non-Stream] Unknown tool name:', callName);
+              console.error('[Non-Stream] ❌ Unknown tool name:', callName);
+              console.log('[Non-Stream] Available tools:', Object.keys(config.toolMap));
               continue;
             }
+            
             let parsedArgs = {};
             try {
               parsedArgs = safeJSONParse(tCall.function?.arguments || '{}');
             } catch (err) {
-              console.error('[Non-Stream] Could not parse tool arguments:', err);
+              console.error('[Non-Stream] ❌ Could not parse tool arguments:', err);
+              continue;
             }
 
-            const toolResult = await fn(appId, userId, channel, parsedArgs);
-            storeToolResponse(tCall.id, callName, toolResult);
+            console.log(`[Non-Stream] 🚀 Calling ${callName} for ${userId} in ${channel}`);
 
-            // Add to messages
-            updatedMessages.push({
-              role: 'assistant',
-              content: '',
-              tool_calls: [tCall],
-            });
-            updatedMessages.push({
-              role: 'tool',
-              name: callName,
-              content: toolResult,
-              tool_call_id: tCall.id,
-            });
+            try {
+              const toolResult = await fn(appId, userId, channel, parsedArgs);
+              console.log(`[Non-Stream] ✅ Tool result for ${callName}:`, toolResult);
+              
+              storeToolResponse(tCall.id, callName, toolResult);
+
+              // Add to messages
+              updatedMessages.push({
+                role: 'assistant',
+                content: '',
+                tool_calls: [tCall],
+              });
+              updatedMessages.push({
+                role: 'tool',
+                name: callName,
+                content: toolResult,
+                tool_call_id: tCall.id,
+              });
+            } catch (toolError) {
+              console.error(`[Non-Stream] ❌ Error executing tool ${callName}:`, toolError);
+              const errorResult = `Error executing ${callName}: ${toolError instanceof Error ? toolError.message : 'Unknown error'}`;
+              
+              // Add error result to messages
+              updatedMessages.push({
+                role: 'assistant',
+                content: '',
+                tool_calls: [tCall],
+              });
+              updatedMessages.push({
+                role: 'tool',
+                name: callName,
+                content: errorResult,
+                tool_call_id: tCall.id,
+              });
+            }
           }
         } // end multi-pass
 
@@ -667,30 +672,26 @@ export function createEndpointHandler(config: EndpointConfig) {
             const char = accumulatedText[i];
             
             if (!inCommand && char === '<') {
-              // Start of a command
               inCommand = true;
               commandBuffer = '<';
             }
             else if (inCommand && char === '>') {
-              // End of a command
               commandBuffer += '>';
               commands.push(commandBuffer);
               inCommand = false;
               commandBuffer = '';
             }
             else if (inCommand) {
-              // Add to command buffer
               commandBuffer += char;
             }
             else {
-              // Normal text
               cleanedText += char;
             }
           }
           
           // Process any remaining command buffer
           if (inCommand && commandBuffer.length > 0) {
-            commands.push(commandBuffer + '>'); // Add closing bracket for incomplete command
+            commands.push(commandBuffer + '>');
           }
           
           // Send commands to RTM
@@ -709,7 +710,6 @@ export function createEndpointHandler(config: EndpointConfig) {
               finalResp.choices[0].message.content = cleanedText;
             }
             
-            // Update RTM last active timestamp
             rtmClientManager.updateLastActive(appId, agent_rtm_uid, agent_rtm_channel);
           }
         }
@@ -717,7 +717,6 @@ export function createEndpointHandler(config: EndpointConfig) {
         // Log the complete non-streaming response
         logFullResponse("NON-STREAM", finalResp);
         
-        // Use direct Response instead of NextResponse.json() for more control
         return new Response(JSON.stringify(finalResp), {
           status: 200,
           headers: {
@@ -726,11 +725,10 @@ export function createEndpointHandler(config: EndpointConfig) {
         });
       }
     } catch (error: unknown) {
-      console.error("Chat Completions Error:", error);
+      console.error("❌ Chat Completions Error:", error);
       const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
       const errorResponse = { error: errorMessage };
       
-      // Log the error response
       logFullResponse("ERROR", errorResponse);
       
       return NextResponse.json(errorResponse, { status: 500 });
