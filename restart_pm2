@@ -1,0 +1,6 @@
+pm2 delete wrap-ui
+npm run pm2-start
+sleep 1
+GET http://localhost:3040
+
+
