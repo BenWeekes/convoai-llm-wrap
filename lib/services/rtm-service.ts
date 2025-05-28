@@ -60,6 +60,7 @@ class RTMService {
       await this.rtmClient.login(options);
       console.log(`[RTM] Successfully logged in as ${userId}`);
       
+      /*
       // Subscribe to channel
       await this.rtmClient.subscribe(this.channelName);
       console.log(`[RTM] Subscribed to channel: ${this.channelName}`);
@@ -71,7 +72,8 @@ class RTMService {
       };
       
       await this.rtmClient.publish(this.channelName, JSON.stringify(startupPayload));
-      
+      */
+
       this.initialized = true;
       return true;
     } catch (error) {
@@ -82,7 +84,7 @@ class RTMService {
   
   private setupEventHandlers() {
     this.rtmClient.addEventListener("message", async (event: any) => {
-      console.log(`[RTM] 📩 CHANNEL MESSAGE from ${event.publisher}:`, event.message);
+      console.log(`[RTM] iMESSAGE from ${event.publisher}:`, event.message);
       
       try {
         // Parse message
@@ -98,6 +100,7 @@ class RTMService {
           }
         }
         
+        console.log(`[RTM] 2 MESSAGE from ${event.publisher}:`, event.message);
         const userId = event.publisher;
         const appId = process.env.RTM_APP_ID || '';
         const model = process.env.RTM_LLM_MODEL || 'gpt-4o-mini';
@@ -114,7 +117,7 @@ class RTMService {
         
         // Process with LLM
         const openai = new OpenAI({
-          apiKey: process.env.OPENAI_API_KEY,
+          apiKey: process.env.RTM_LLM_API_KEY,
           baseURL
         });
         
@@ -124,7 +127,8 @@ class RTMService {
           messages = [
             {
               role: 'system',
-              content: exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData)
+              content: process.env.RTM_LLM_PROMPT || ""
+              //content: exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData)
             },
             ...messages
           ];
@@ -144,6 +148,8 @@ class RTMService {
         // Handle response and tool calls (simplified)
         let finalResponse = response.choices[0].message.content || '';
         
+        console.log(`[RTM] LLM response from assistant:`, finalResponse);
+
         // Save assistant response
         await saveMessage(appId, userId, {
           role: 'assistant',
@@ -157,7 +163,15 @@ class RTMService {
           recipient: userId
         };
         
-        await this.rtmClient.publish(this.channelName, JSON.stringify(responsePayload));
+
+        const options = {
+          customType: "user.transcription",
+          channelType: "USER",
+        };
+        
+        // Send message to the channel using the channel-specific target
+        await this.rtmClient.publish(event.publisher,finalResponse, options);
+      //  await this.rtmClient.publish(this.channelName, JSON.stringify(responsePayload));
       } catch (error) {
         console.error('[RTM] Error processing message:', error);
       }
