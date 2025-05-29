@@ -1,5 +1,8 @@
 // lib/common/conversation-store.ts
 // Enhanced with communication mode support while preserving existing functionality
+// Added configurable debug logging for conversation context
+
+import { CONFIG } from './cache';
 
 // Define the interfaces
 export interface Message {
@@ -35,6 +38,131 @@ function getConversationKey(appId: string, userId: string): string {
 }
 
 /**
+ * Logs conversation context with mode analysis
+ */
+export function logConversationContext(
+  appId: string, 
+  userId: string, 
+  conversation: Conversation,
+  action: 'retrieved' | 'created' | 'updated'
+): void {
+  if (!CONFIG.enableConversationLogging) return;
+
+  const separator = "💬".repeat(30);
+  console.log(separator);
+  console.log(`💬 CONVERSATION ${action.toUpperCase()} - ${new Date().toISOString()}`);
+  console.log(`- User: ${userId}`);
+  console.log(`- App: ${appId}`);
+  console.log(`- Total Messages: ${conversation.messages.length}`);
+  console.log(`- Last Updated: ${new Date(conversation.lastUpdated).toISOString()}`);
+  
+  // Analyze mode distribution in conversation
+  const modeStats = {
+    chat: 0,
+    video: 0,
+    voice: 0,
+    unspecified: 0
+  };
+  
+  let lastUserMode = 'unknown';
+  let lastAssistantMode = 'unknown';
+  
+  conversation.messages.forEach((msg, index) => {
+    if (msg.mode === 'chat') modeStats.chat++;
+    else if (msg.mode === 'video') modeStats.video++;
+    else if (msg.mode === 'voice') modeStats.voice++;
+    else modeStats.unspecified++;
+    
+    // Track last modes by role
+    if (msg.role === 'user' && msg.mode) {
+      lastUserMode = msg.mode;
+    } else if (msg.role === 'assistant' && msg.mode) {
+      lastAssistantMode = msg.mode;
+    }
+  });
+  
+  console.log(`💬 MODE DISTRIBUTION:`);
+  console.log(`  - Chat: ${modeStats.chat} messages`);
+  console.log(`  - Video: ${modeStats.video} messages`);
+  console.log(`  - Voice: ${modeStats.voice} messages`);
+  console.log(`  - Unspecified: ${modeStats.unspecified} messages`);
+  console.log(`💬 LAST MODES:`);
+  console.log(`  - Last User Mode: ${lastUserMode}`);
+  console.log(`  - Last Assistant Mode: ${lastAssistantMode}`);
+  
+  // Show recent message sequence with modes
+  if (conversation.messages.length > 0) {
+    console.log(`💬 RECENT MESSAGES (last 5):`);
+    const recentMessages = conversation.messages.slice(-5);
+    recentMessages.forEach((msg, index) => {
+      const actualIndex = conversation.messages.length - 5 + index;
+      const modeInfo = msg.mode ? ` [${msg.mode}]` : ' [no mode]';
+      const preview = msg.content ? 
+        (msg.content.length > 50 ? msg.content.substring(0, 50) + '...' : msg.content) : 
+        '[no content]';
+      console.log(`  [${actualIndex}] ${msg.role}${modeInfo}: ${preview}`);
+    });
+  }
+  
+  // Detect potential mode transitions
+  const transition = detectModeTransition(conversation);
+  if (transition.hasModeTransition) {
+    console.log(`💬 🚨 MODE TRANSITION DETECTED:`);
+    console.log(`  - Last User Mode: ${transition.lastUserMode}`);
+    console.log(`  - Last Assistant Mode: ${transition.lastAssistantMode}`);
+    if (transition.possibleHangup) {
+      console.log(`  - 🔥 POSSIBLE HANGUP: Video/Voice → Chat transition detected!`);
+    }
+  }
+  
+  console.log(separator);
+}
+
+/**
+ * Detects potential mode transitions in conversation
+ */
+export function detectModeTransition(conversation: Conversation): {
+  hasModeTransition: boolean;
+  lastUserMode?: string;
+  lastAssistantMode?: string;
+  possibleHangup: boolean;
+} {
+  const messages = conversation.messages;
+  if (messages.length < 2) {
+    return { hasModeTransition: false, possibleHangup: false };
+  }
+  
+  // Find last user and assistant messages with modes
+  let lastUserMode: string | undefined;
+  let lastAssistantMode: string | undefined;
+  
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role === 'user' && msg.mode && !lastUserMode) {
+      lastUserMode = msg.mode;
+    } else if (msg.role === 'assistant' && msg.mode && !lastAssistantMode) {
+      lastAssistantMode = msg.mode;
+    }
+    
+    if (lastUserMode && lastAssistantMode) break;
+  }
+  
+  // Check for mode transitions
+  const hasModeTransition = lastUserMode !== lastAssistantMode;
+  
+  // Check for possible hangup (video/voice to chat transition)
+  const possibleHangup = (lastAssistantMode === 'video' || lastAssistantMode === 'voice') && 
+                         lastUserMode === 'chat';
+  
+  return {
+    hasModeTransition,
+    lastUserMode,
+    lastAssistantMode,
+    possibleHangup
+  };
+}
+
+/**
  * Gets an existing conversation or creates a new one if it doesn't exist
  */
 export async function getOrCreateConversation(appId: string, userId: string): Promise<Conversation> {
@@ -49,8 +177,14 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
       messages: [],
       lastUpdated: Date.now()
     };
+    
+    // LOG NEW CONVERSATION CREATION
+    logConversationContext(appId, userId, conversationStore[key], 'created');
   } else {
     console.log(`[CONVERSATION] Found existing conversation for ${userId} with ${conversationStore[key].messages.length} messages`);
+    
+    // LOG CONVERSATION RETRIEVAL
+    logConversationContext(appId, userId, conversationStore[key], 'retrieved');
   }
   
   return conversationStore[key];
@@ -99,6 +233,9 @@ export async function saveMessage(appId: string, userId: string, message: Messag
   
   const modeInfo = enhancedMessage.mode ? ` (${enhancedMessage.mode} mode)` : '';
   console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo} for ${userId}. Conversation now has ${conversation.messages.length} messages`);
+  
+  // LOG CONVERSATION UPDATE WITH MODE CONTEXT
+  logConversationContext(appId, userId, conversation, 'updated');
 }
 
 /**

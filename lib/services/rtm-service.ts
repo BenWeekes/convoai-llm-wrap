@@ -1,9 +1,11 @@
 // lib/services/rtm-service.ts
+// Enhanced with configurable debug logging for RTM interactions
 
 import AgoraRTM from 'rtm-nodejs';
 import { getOrCreateConversation, saveMessage } from '../common/conversation-store';
 import { handleModelRequest } from '../common/model-handler';
 import { exampleEndpointConfig } from '../endpoints/example-endpoint';
+import { logRTMMessageProcessing, logLLMRequest, logLLMResponse, logModeTransition } from '../common/utils';
 import OpenAI from 'openai';
 
 // RTM client singleton
@@ -84,7 +86,7 @@ class RTMService {
   
   private setupEventHandlers() {
     this.rtmClient.addEventListener("message", async (event: any) => {
-      console.log(`[RTM] iMESSAGE from ${event.publisher}:`, event.message);
+      console.log(`[RTM] RAW MESSAGE from ${event.publisher}:`, event.message);
       
       try {
         // Parse message
@@ -100,7 +102,26 @@ class RTMService {
           }
         }
         
-        console.log(`[RTM] 2 MESSAGE from ${event.publisher}:`, event.message);
+        // LOG RTM MESSAGE PROCESSING
+        logRTMMessageProcessing({
+          userId: event.publisher,
+          appId: process.env.RTM_APP_ID || '',
+          messageContent,
+          channel: this.channelName,
+          timestamp: Date.now()
+        });
+        
+        // LOG MODE TRANSITION (RTM chat is always 'chat' mode)
+        logModeTransition({
+          userId: event.publisher,
+          appId: process.env.RTM_APP_ID || '',
+          fromMode: 'unknown',
+          toMode: 'chat',
+          channel: this.channelName,
+          trigger: 'rtm_message'
+        });
+        
+        console.log(`[RTM] PROCESSED MESSAGE from ${event.publisher}:`, messageContent);
         const userId = event.publisher;
         const appId = process.env.RTM_APP_ID || '';
         const model = process.env.RTM_LLM_MODEL || 'gpt-4o-mini';
@@ -109,11 +130,14 @@ class RTMService {
         // Get or create conversation
         const conversation = await getOrCreateConversation(appId, userId);
         
-        // Add user message
+        // Add user message with CHAT mode
         await saveMessage(appId, userId, {
           role: 'user',
-          content: messageContent
+          content: messageContent,
+          mode: 'chat' // RTM messages are always chat mode
         });
+        
+        console.log(`[RTM] SAVED USER MESSAGE with mode: chat`);
         
         // Process with LLM
         const openai = new OpenAI({
@@ -121,14 +145,26 @@ class RTMService {
           baseURL
         });
         
-        // Prepare messages
-        let messages = conversation.messages;
+        // Prepare messages - get updated conversation after saving user message
+        const updatedConversation = await getOrCreateConversation(appId, userId);
+        let messages = updatedConversation.messages;
+        
+        // Add system message if not present
         if (!messages.some(msg => msg.role === 'system')) {
+          const systemContent = process.env.RTM_LLM_PROMPT || 
+            exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData);
+          
+          // Add chat mode context to system message
+          const chatModeContext = `
+
+CURRENT COMMUNICATION MODE: CHAT (user is texting you via RTM)
+AVAILABLE MODES: chat, video`;
+          
           messages = [
             {
               role: 'system',
-              content: process.env.RTM_LLM_PROMPT || ""
-              //content: exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData)
+              content: systemContent + chatModeContext,
+              mode: 'chat'
             },
             ...messages
           ];
@@ -142,19 +178,45 @@ class RTMService {
           tool_choice: 'auto'
         };
         
+        // LOG THE RTM LLM REQUEST
+        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT`);
+        logLLMRequest(requestParams, {
+          userId,
+          appId,
+          channel: this.channelName,
+          endpointMode: 'chat', // RTM is always chat mode
+          conversationLength: updatedConversation.messages.length
+        });
+        
         // Process with LLM
         const response = await handleModelRequest(openai, requestParams);
+        
+        // LOG THE RTM LLM RESPONSE
+        logLLMResponse(response, {
+          userId,
+          appId,
+          channel: this.channelName,
+          endpointMode: 'chat',
+          requestType: 'non-streaming'
+        });
         
         // Handle response and tool calls (simplified)
         let finalResponse = response.choices[0].message.content || '';
         
-        console.log(`[RTM] LLM response from assistant:`, finalResponse);
+        console.log(`[RTM] 🤖 LLM RESPONSE for RTM CHAT:`, finalResponse);
 
-        // Save assistant response
+        // Save assistant response with CHAT mode
+        console.log(`[RTM] 💾 SAVING ASSISTANT RESPONSE WITH MODE: chat`);
+        console.log(`[RTM] Response content length: ${finalResponse.length} chars`);
+        console.log(`[RTM] Response preview: ${finalResponse.substring(0, 100)}${finalResponse.length > 100 ? '...' : ''}`);
+        
         await saveMessage(appId, userId, {
           role: 'assistant',
-          content: finalResponse
+          content: finalResponse,
+          mode: 'chat' // RTM responses are always chat mode
         });
+        
+        console.log(`[RTM] SAVED ASSISTANT RESPONSE with mode: chat`);
         
         // Send response back
         const responsePayload = {
@@ -163,17 +225,20 @@ class RTMService {
           recipient: userId
         };
         
-
         const options = {
           customType: "user.transcription",
           channelType: "USER",
         };
         
+        console.log(`[RTM] 📤 SENDING RESPONSE TO ${event.publisher}`);
+        console.log(`[RTM] Response payload:`, responsePayload);
+        
         // Send message to the channel using the channel-specific target
-        await this.rtmClient.publish(event.publisher,finalResponse, options);
-      //  await this.rtmClient.publish(this.channelName, JSON.stringify(responsePayload));
+        await this.rtmClient.publish(event.publisher, finalResponse, options);
+        console.log(`[RTM] ✅ RESPONSE SENT TO ${event.publisher}`);
+        
       } catch (error) {
-        console.error('[RTM] Error processing message:', error);
+        console.error('[RTM] ❌ ERROR PROCESSING MESSAGE:', error);
       }
     });
     

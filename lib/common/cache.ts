@@ -1,5 +1,6 @@
 // File: lib/common/cache.ts
 // This file contains the shared caching functionality
+// Enhanced with debug logging configuration
 
 import type { ToolResponseCacheItem } from '../types';
 
@@ -7,10 +8,18 @@ import type { ToolResponseCacheItem } from '../types';
 export const CONFIG = {
   // Set to false to disable detailed response logging (reduces console output)
   enableDetailedResponseLogging: false, // CHANGED: Set to false by default for quieter logs
-  // Cache expiration time in milliseconds (24 hours)
-  cacheExpirationMs: 86400000,
-  // Interval for cleaning up expired cache entries (1 minute)
-  cleanupIntervalMs: 60000
+  
+  // NEW: LLM Debug Logging Configuration
+  enableLLMRequestLogging: true,      // Log what's sent to LLM
+  enableLLMResponseLogging: true,     // Log what LLM responds with
+  enableStreamingChunkLogging: false, // Log individual streaming chunks (very verbose)
+  enableModeTransitionLogging: true,  // Log communication mode changes
+  enableConversationLogging: true,    // Log conversation context and mode analysis
+  enableRTMMessageLogging: true,      // Log RTM message processing
+  
+  // Cache configuration
+  cacheExpirationMs: 86400000,       // Cache expiration time in milliseconds (24 hours)
+  cleanupIntervalMs: 60000            // Interval for cleaning up expired cache entries (1 minute)
 };
 
 // Global cache to store tool responses (will be shared across requests)

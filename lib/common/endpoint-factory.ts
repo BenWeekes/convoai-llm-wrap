@@ -1,11 +1,11 @@
 // lib/common/endpoint-factory.ts
 // Factory function to create standardized endpoint handlers with multi-pass tool support and RTM chat integration
-// Enhanced with communication mode support
+// Enhanced with communication mode support and configurable debug logging
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import type { RequestWithJson, EndpointConfig } from '../types';
-import { validateToken, logFullResponse, generateCallId, safeJSONParse, extractCommands } from './utils';
+import { validateToken, logFullResponse, generateCallId, safeJSONParse, extractCommands, logLLMRequest, logLLMResponse, logStreamingChunk, logModeTransition } from './utils';
 import { logCacheState, storeToolResponse } from './cache';
 import { insertCachedToolResponses } from './message-processor';
 import { handleModelRequest } from './model-handler';
@@ -34,7 +34,8 @@ async function executeToolCall(
   encoder: TextEncoder,
   rtmClient: any,
   enable_rtm: boolean,
-  agent_rtm_channel: string
+  agent_rtm_channel: string,
+  endpointMode?: string
 ): Promise<void> {
   console.log(`🚀 EXECUTING TOOL CALL - all conditions met`);
   
@@ -110,12 +111,33 @@ async function executeToolCall(
     }
 
     console.log(`🔄 Making final stream request with ${updatedMessages.length} messages`);
+    
+    // LOG THE FINAL REQUEST AFTER TOOL EXECUTION
+    logLLMRequest(finalStreamParams, {
+      userId,
+      appId,
+      channel,
+      endpointMode,
+      conversationLength: updatedMessages.length
+    });
+    
     const finalResponse = await handleModelRequest(openai, finalStreamParams);
     
     // Stream the final response
+    let finalChunkIndex = 0;
     for await (const part2 of finalResponse) {
+      finalChunkIndex++;
       const chunk2 = part2.choices?.[0];
       const delta2 = chunk2?.delta;
+      
+      // LOG FINAL STREAMING CHUNKS
+      logStreamingChunk(part2, {
+        userId,
+        chunkIndex: finalChunkIndex,
+        hasToolCalls: !!delta2?.tool_calls,
+        hasContent: !!delta2?.content,
+        finishReason: chunk2?.finish_reason
+      });
       
       if (delta2?.content) {
         // Process content and extract commands
@@ -204,7 +226,7 @@ function endStream(
 
 /**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
- * Enhanced with communication mode support
+ * Enhanced with communication mode support and debug logging
  */
 export function createEndpointHandler(config: EndpointConfig, endpointName?: string) {
   return async function endpointHandler(req: RequestWithJson) {
@@ -405,6 +427,16 @@ AVAILABLE MODES: chat`;
       // Save user messages to conversation with mode information
       for (const message of processedRequestMessages) {
         if (message.role === 'user') {
+          // LOG MODE TRANSITION
+          logModeTransition({
+            userId,
+            appId,
+            fromMode: 'unknown', // We could enhance this to track previous mode
+            toMode: endpointMode || 'unspecified',
+            channel,
+            trigger: 'api_call'
+          });
+
           await saveMessage(appId, userId, {
             role: 'user',
             content: message.content,
@@ -441,6 +473,25 @@ AVAILABLE MODES: chat`;
           // Set up streaming parameters
           const streamParams = { ...commonRequestParams, messages: finalMessages, stream: true };
           
+          // LOG THE REQUEST TO LLM - STREAMING
+          console.log(`\n🚀 ABOUT TO MAKE STREAMING LLM REQUEST`);
+          logLLMRequest(streamParams, {
+            userId,
+            appId,
+            channel,
+            endpointMode,
+            conversationLength: existingConversation.messages.length
+          });
+
+          // LOG RESPONSE CONTEXT
+          logLLMResponse(null, {
+            userId,
+            appId,
+            channel,
+            endpointMode,
+            requestType: 'streaming'
+          });
+          
           // Make the request with error handling
           const streamingResponse = await handleModelRequest(openai, streamParams);
 
@@ -461,12 +512,23 @@ AVAILABLE MODES: chat`;
               try {
                 let inCommand = false;
                 let commandBuffer = '';
+                let chunkIndex = 0; // ADD CHUNK COUNTER
                 
                 for await (const part of streamingResponse) {
+                  chunkIndex++; // INCREMENT CHUNK COUNTER
                   if (controllerClosed.value) continue;
                   
                   const chunk = part.choices?.[0];
                   const delta = chunk?.delta;
+
+                  // LOG EACH STREAMING CHUNK
+                  logStreamingChunk(part, {
+                    userId,
+                    chunkIndex,
+                    hasToolCalls: !!delta?.tool_calls,
+                    hasContent: !!delta?.content,
+                    finishReason: chunk?.finish_reason
+                  });
 
                   // Only log important chunks to reduce noise
                   if (chunk?.finish_reason || delta?.tool_calls) {
@@ -610,7 +672,8 @@ AVAILABLE MODES: chat`;
                         encoder,
                         rtmClient,
                         enable_rtm,
-                        agent_rtm_channel
+                        agent_rtm_channel,
+                        endpointMode
                       );
                       
                       endStream(controller, encoder, completeResponse, "STREAM WITH TOOL", controllerClosed);
@@ -621,6 +684,10 @@ AVAILABLE MODES: chat`;
                       
                       // Save assistant response to conversation with mode
                       if (accumulatedContent.trim()) {
+                        console.log(`💾 SAVING ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'}`);
+                        console.log(`💾 Response content length: ${accumulatedContent.trim().length} chars`);
+                        console.log(`💾 Response preview: ${accumulatedContent.trim().substring(0, 100)}${accumulatedContent.length > 100 ? '...' : ''}`);
+                        
                         await saveMessage(appId, userId, {
                           role: 'assistant',
                           content: accumulatedContent.trim(),
@@ -652,6 +719,10 @@ AVAILABLE MODES: chat`;
                 
                 // Save assistant response to conversation with mode
                 if (accumulatedContent.trim()) {
+                  console.log(`💾 SAVING FINAL ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'}`);
+                  console.log(`💾 Response content length: ${accumulatedContent.trim().length} chars`);
+                  console.log(`💾 Response preview: ${accumulatedContent.trim().substring(0, 100)}${accumulatedContent.length > 100 ? '...' : ''}`);
+                  
                   await saveMessage(appId, userId, {
                     role: 'assistant',
                     content: accumulatedContent.trim(),
@@ -727,9 +798,30 @@ AVAILABLE MODES: chat`;
           passCount++;
           console.log(`[Non-Stream] ---- PASS #${passCount} ----`);
 
+          // LOG THE REQUEST TO LLM - NON-STREAMING
+          logLLMRequest({
+            ...commonRequestParams,
+            messages: updatedMessages,
+          }, {
+            userId,
+            appId,
+            channel,
+            endpointMode,
+            conversationLength: existingConversation.messages.length
+          });
+
           const passResponse = await handleModelRequest(openai, {
             ...commonRequestParams,
             messages: updatedMessages,
+          });
+
+          // LOG EACH PASS RESPONSE
+          logLLMResponse(passResponse, {
+            userId,
+            appId, 
+            channel,
+            endpointMode,
+            requestType: 'non-streaming'
           });
 
           finalResp = passResponse;
@@ -818,6 +910,10 @@ AVAILABLE MODES: chat`;
 
         // Save assistant response to conversation with mode
         if (accumulatedText.trim()) {
+          console.log(`💾 SAVING NON-STREAMING ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'}`);
+          console.log(`💾 Response content length: ${accumulatedText.trim().length} chars`);
+          console.log(`💾 Response preview: ${accumulatedText.trim().substring(0, 100)}${accumulatedText.length > 100 ? '...' : ''}`);
+          
           await saveMessage(appId, userId, {
             role: 'assistant',
             content: accumulatedText.trim(),

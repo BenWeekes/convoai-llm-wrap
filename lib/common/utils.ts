@@ -1,5 +1,6 @@
 // File: lib/common/utils.ts
 // Common utility functions shared across endpoints
+// Enhanced with configurable debug logging
 
 import OpenAI from 'openai';
 import { CONFIG } from './cache';
@@ -196,4 +197,240 @@ export function simplifyMessagesForLlama(messages: any[]): any[] {
   
   // Otherwise return the original messages
   return messages;
+}
+
+// ============================================================================
+// NEW DEBUG LOGGING FUNCTIONS WITH CONFIGURATION
+// ============================================================================
+
+/**
+ * Logs LLM request details with communication mode context
+ */
+export function logLLMRequest(requestParams: any, context: {
+  userId: string;
+  appId: string;
+  channel: string;
+  endpointMode?: string;
+  conversationLength: number;
+}): void {
+  if (!CONFIG.enableLLMRequestLogging) return;
+
+  const separator = "🤖".repeat(40);
+  console.log(separator);
+  console.log(`🤖 LLM REQUEST DEBUG - ${new Date().toISOString()}`);
+  console.log(separator);
+  
+  console.log(`📋 REQUEST CONTEXT:`);
+  console.log(`- User: ${context.userId}`);
+  console.log(`- App: ${context.appId}`);
+  console.log(`- Channel: ${context.channel}`);
+  console.log(`- Endpoint Mode: ${context.endpointMode || 'not specified'}`);
+  console.log(`- Conversation Length: ${context.conversationLength} messages`);
+  console.log(`- Model: ${requestParams.model}`);
+  console.log(`- Stream: ${requestParams.stream}`);
+  console.log(`- Tools Available: ${requestParams.tools ? requestParams.tools.length : 0}`);
+  
+  console.log(`\n💬 MESSAGES BEING SENT TO LLM (${requestParams.messages.length} total):`);
+  requestParams.messages.forEach((msg: any, index: number) => {
+    const modeInfo = msg.mode ? ` [MODE: ${msg.mode}]` : '';
+    const truncatedContent = msg.content ? 
+      (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content) : 
+      '[no content]';
+    
+    if (msg.role === 'system') {
+      console.log(`[${index}] 🎯 SYSTEM${modeInfo}:`);
+      console.log(`    ${truncatedContent}`);
+    } else if (msg.role === 'user') {
+      console.log(`[${index}] 👤 USER${modeInfo}: ${truncatedContent}`);
+    } else if (msg.role === 'assistant') {
+      if (msg.tool_calls) {
+        console.log(`[${index}] 🤖 ASSISTANT${modeInfo}: [${msg.tool_calls.length} tool calls]`);
+      } else {
+        console.log(`[${index}] 🤖 ASSISTANT${modeInfo}: ${truncatedContent}`);
+      }
+    } else if (msg.role === 'tool') {
+      console.log(`[${index}] 🔧 TOOL (${msg.name || 'unknown'}): ${truncatedContent}`);
+    }
+  });
+  
+  // Highlight system message mode context
+  const systemMsg = requestParams.messages.find((m: any) => m.role === 'system');
+  if (systemMsg && systemMsg.content.includes('CURRENT COMMUNICATION MODE')) {
+    console.log(`\n🎯 COMMUNICATION MODE CONTEXT IN SYSTEM MESSAGE:`);
+    const modeLines = systemMsg.content.split('\n').filter((line: string) => 
+      line.includes('CURRENT COMMUNICATION MODE') || 
+      line.includes('AVAILABLE MODES') ||
+      line.includes('VIDEO') ||
+      line.includes('VOICE') ||
+      line.includes('CHAT')
+    );
+    modeLines.forEach((line: string) => console.log(`    ${line.trim()}`));
+  }
+  
+  console.log(separator);
+}
+
+/**
+ * Logs LLM response details with mode analysis
+ */
+export function logLLMResponse(response: any, context: {
+  userId: string;
+  appId: string;
+  channel: string;
+  endpointMode?: string;
+  requestType: 'streaming' | 'non-streaming';
+}): void {
+  if (!CONFIG.enableLLMResponseLogging) return;
+
+  const separator = "🎭".repeat(40);
+  console.log(separator);
+  console.log(`🎭 LLM RESPONSE DEBUG - ${new Date().toISOString()}`);
+  console.log(separator);
+  
+  console.log(`📋 RESPONSE CONTEXT:`);
+  console.log(`- User: ${context.userId}`);
+  console.log(`- App: ${context.appId}`);
+  console.log(`- Channel: ${context.channel}`);
+  console.log(`- Endpoint Mode: ${context.endpointMode || 'not specified'}`);
+  console.log(`- Request Type: ${context.requestType}`);
+  
+  if (context.requestType === 'streaming') {
+    console.log(`\n🌊 STREAMING RESPONSE - see individual chunk logs below`);
+  } else {
+    // Non-streaming response
+    const choice = response?.choices?.[0];
+    if (choice) {
+      console.log(`\n🤖 LLM COMPLETE RESPONSE:`);
+      console.log(`- Finish Reason: ${choice.finish_reason}`);
+      
+      if (choice.message?.content) {
+        console.log(`- Content Length: ${choice.message.content.length} chars`);
+        console.log(`- Content: ${choice.message.content}`);
+        
+        // Analyze content for mode-related keywords
+        const content = choice.message.content.toLowerCase();
+        const modeKeywords = ['video', 'call', 'chat', 'hang up', 'switch', 'text'];
+        const foundKeywords = modeKeywords.filter(keyword => content.includes(keyword));
+        if (foundKeywords.length > 0) {
+          console.log(`- Mode-Related Keywords Found: ${foundKeywords.join(', ')}`);
+        }
+      }
+      
+      if (choice.message?.tool_calls) {
+        console.log(`- Tool Calls: ${choice.message.tool_calls.length}`);
+        choice.message.tool_calls.forEach((call: any, index: number) => {
+          console.log(`  [${index}] ${call.function?.name}: ${call.function?.arguments}`);
+        });
+      }
+    }
+  }
+  
+  console.log(separator);
+}
+
+/**
+ * Logs streaming chunk details with mode context
+ */
+export function logStreamingChunk(chunk: any, context: {
+  userId: string;
+  chunkIndex: number;
+  hasToolCalls: boolean;
+  hasContent: boolean;
+  finishReason?: string;
+}): void {
+  if (!CONFIG.enableStreamingChunkLogging) return;
+
+  const prefix = `🌊 CHUNK[${context.chunkIndex}]`;
+  
+  if (context.hasToolCalls) {
+    console.log(`${prefix} 🔧 TOOL_CALLS for ${context.userId}`);
+    const delta = chunk.choices?.[0]?.delta;
+    if (delta?.tool_calls) {
+      delta.tool_calls.forEach((call: any, i: number) => {
+        if (call.function?.name) {
+          console.log(`  ${prefix} Tool[${i}]: ${call.function.name}`);
+        }
+        if (call.function?.arguments) {
+          console.log(`  ${prefix} Args[${i}]: ${call.function.arguments}`);
+        }
+      });
+    }
+  }
+  
+  if (context.hasContent) {
+    const content = chunk.choices?.[0]?.delta?.content || '';
+    console.log(`${prefix} 💬 CONTENT for ${context.userId}: "${content}"`);
+    
+    // Check for mode-related content
+    const contentLower = content.toLowerCase();
+    if (contentLower.includes('video') || contentLower.includes('call') || 
+        contentLower.includes('chat') || contentLower.includes('hang up')) {
+      console.log(`${prefix} 🎯 MODE-RELATED CONTENT DETECTED`);
+    }
+  }
+  
+  if (context.finishReason) {
+    console.log(`${prefix} 🏁 FINISH_REASON for ${context.userId}: ${context.finishReason}`);
+  }
+}
+
+/**
+ * Logs conversation mode transition
+ */
+export function logModeTransition(context: {
+  userId: string;
+  appId: string;
+  fromMode?: string;
+  toMode?: string;
+  channel: string;
+  trigger: string; // 'api_call' | 'rtm_message' | 'hangup' | 'unknown'
+}): void {
+  if (!CONFIG.enableModeTransitionLogging) return;
+
+  const separator = "🔄".repeat(30);
+  console.log(separator);
+  console.log(`🔄 MODE TRANSITION DEBUG - ${new Date().toISOString()}`);
+  console.log(`- User: ${context.userId}`);
+  console.log(`- App: ${context.appId}`);
+  console.log(`- Channel: ${context.channel}`);
+  console.log(`- From Mode: ${context.fromMode || 'unknown'}`);
+  console.log(`- To Mode: ${context.toMode || 'unknown'}`);
+  console.log(`- Trigger: ${context.trigger}`);
+  console.log(separator);
+}
+
+/**
+ * Logs RTM message processing with mode context
+ */
+export function logRTMMessageProcessing(context: {
+  userId: string;
+  appId: string;
+  messageContent: string;
+  channel: string;
+  timestamp: number;
+}): void {
+  if (!CONFIG.enableRTMMessageLogging) return;
+
+  const separator = "📨".repeat(40);
+  console.log(separator);
+  console.log(`📨 RTM MESSAGE PROCESSING - ${new Date().toISOString()}`);
+  console.log(separator);
+  
+  console.log(`📋 RTM MESSAGE CONTEXT:`);
+  console.log(`- User: ${context.userId}`);
+  console.log(`- App: ${context.appId}`);
+  console.log(`- Channel: ${context.channel}`);
+  console.log(`- Timestamp: ${new Date(context.timestamp).toISOString()}`);
+  console.log(`- Message Length: ${context.messageContent.length} chars`);
+  console.log(`- Message Content: ${context.messageContent}`);
+  
+  // Analyze message for mode-related keywords
+  const contentLower = context.messageContent.toLowerCase();
+  const modeKeywords = ['video', 'call', 'chat', 'hang up', 'switch', 'text', 'bye', 'goodbye'];
+  const foundKeywords = modeKeywords.filter(keyword => contentLower.includes(keyword));
+  if (foundKeywords.length > 0) {
+    console.log(`📨 MODE-RELATED KEYWORDS DETECTED: ${foundKeywords.join(', ')}`);
+  }
+  
+  console.log(separator);
 }
