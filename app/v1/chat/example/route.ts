@@ -1,15 +1,12 @@
-// File: app/v1/chat/example/route.ts
-// Route handler for the example endpoint with sandwich and photo tools
+// File: app/api/example/route.ts
+// API route for the example endpoint with RTM chat integration
 
-import { createEndpointHandler } from '../../../../lib/common/endpoint-factory';
-import { exampleEndpointConfig } from '../../../../lib/endpoints/example-endpoint';
+import { createEndpointHandler } from '@/lib/common/endpoint-factory';
+import { exampleEndpointConfig } from '@/lib/endpoints/example-endpoint';
 
-export const runtime = 'nodejs';
+// Create the handler with the endpoint name for RTM chat initialization
+const handler = createEndpointHandler(exampleEndpointConfig, 'EXAMPLE');
 
-// Create the endpoint handler using the example configuration
-const handler = createEndpointHandler(exampleEndpointConfig);
-
-// Export the POST method
-export async function POST(req: Request) {
-  return handler(req);
-}
+// Export the handler for both GET and POST
+export const GET = handler;
+export const POST = handler;

@@ -234,6 +234,8 @@ const LANGUAGE_TUTOR_TOOL_MAP = {
 };
 
 // Export the complete endpoint configuration
+// This endpoint doesn't specify communication modes, so it will work exactly as before
+// No RTM chat will be initialized, no mode context will be added to system messages
 export const languageTutorEndpointConfig: EndpointConfig = {
   ragData: LANGUAGE_TUTOR_RAG_DATA,
   tools: LANGUAGE_TUTOR_TOOLS,

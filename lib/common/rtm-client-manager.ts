@@ -1,80 +1,48 @@
 // lib/common/rtm-client-manager.ts
-// Manages RTM client connections with automatic timeout
+// Manages RTM client connections with PERSISTENT behavior (like old rtm-service.ts)
 
 import AgoraRTM from 'rtm-nodejs';
 
 // RTM session information
 export interface RTMClientSession {
-  rtmClient: any; // Explicitly use 'any' type to match rtm-service.ts
+  rtmClient: any;
   lastActive: number;
   channelName: string;
   userId: string;
   appId: string;
+  token: string;
   messageHandlers: RTMMessageHandler[];
+  reconnectAttempts: number;
+  isPersistent: boolean; // Never auto-cleanup if true
 }
 
-// Message handler type
-export type RTMMessageHandler = (message: any) => void;
+// Message handler type - receives full RTM event
+export type RTMMessageHandler = (event: any) => void;
 
 export type RTMClientParams = {
   enable_rtm?: boolean;
   agent_rtm_uid?: string;
   agent_rtm_token?: string;
   agent_rtm_channel?: string;
-  appId: string; // Required parameter
+  appId: string;
 }
 
 // Simplified logging function
 function logRtm(message: string, ...args: any[]) {
-  //console.log(`[RTMx] ${message}`, ...args);
+  console.log(`[RTM-PERSIST] ${message}`, ...args);
 }
 
-// Client manager that handles multiple RTM connections
+// Client manager that maintains PERSISTENT RTM connections (like old rtm-service.ts)
 class RTMClientManager {
   private static instance: RTMClientManager;
   private clients: Map<string, RTMClientSession> = new Map();
-  private timeoutId: NodeJS.Timeout | null = null;
-  private cleanupIntervalMs: number = 10000; // Check every 10 seconds
-  private sessionTimeoutMs: number = 60000; // 60 seconds timeout
+  private reconnectTimeoutMs: number = 5000;
+  private maxReconnectAttempts: number = 999; // Essentially infinite
+  
+  // NO CLEANUP TIMER - connections persist forever like rtm-service.ts
 
   constructor() {
-    this.startCleanupTimer();
-    logRtm("RTM Client Manager initialized");
-  }
-
-  private startCleanupTimer() {
-    if (this.timeoutId) {
-      clearInterval(this.timeoutId);
-    }
-
-    this.timeoutId = setInterval(() => {
-      this.cleanupInactiveSessions();
-    }, this.cleanupIntervalMs);
-  }
-
-  private cleanupInactiveSessions() {
-    const now = Date.now();
-    let removedCount = 0;
-
-    // Convert Map entries to array and then iterate
-    Array.from(this.clients.entries()).forEach(([key, session]) => {
-      if (now - session.lastActive > this.sessionTimeoutMs) {
-        // Logout and clean up
-        try {
-          logRtm(`Auto-logging out inactive client: ${session.userId} from channel ${session.channelName}`);
-          session.rtmClient.logout();
-        } catch (error) {
-          console.error(`[RTM] Error during logout for ${session.userId}:`, error);
-        }
-
-        this.clients.delete(key);
-        removedCount++;
-      }
-    });
-
-    if (removedCount > 0) {
-      logRtm(`Cleaned up ${removedCount} inactive RTM clients`);
-    }
+    logRtm("RTM Client Manager initialized with PERSISTENT connections (no auto-cleanup)");
   }
 
   /**
@@ -85,125 +53,184 @@ class RTMClientManager {
   }
 
   /**
-   * Sets up message event listeners for an RTM client
+   * Sets up message event listeners for an RTM client with aggressive reconnection
    */
   private setupMessageListeners(rtmClient: any, appId: string, userId: string, channelName: string): void {
+    const sessionKey = this.getSessionKey(appId, userId, channelName);
+    
     // Add message event listener
     rtmClient.addEventListener("message", (event: any) => {
-      logRtm(`Received message on channel ${channelName}:`, event);
-      
       try {
-        // Parse message content if it's a string
-        let messageContent = event.message;
-        if (typeof event.message === 'string') {
-          try {
-            const parsed = JSON.parse(event.message);
-            messageContent = parsed;
-          } catch (e) {
-            // Not JSON or invalid JSON, use as is
-            logRtm("Message is not valid JSON, using raw string");
-          }
-        }
-        
-        // Get session to access message handlers
-        const sessionKey = this.getSessionKey(appId, userId, channelName);
         const session = this.clients.get(sessionKey);
-        
         if (session) {
-          // Update last active time
           session.lastActive = Date.now();
           
           // Call all registered message handlers
           session.messageHandlers.forEach(handler => {
             try {
-              handler(messageContent);
+              handler(event);
             } catch (handlerError) {
-              console.error('[RTM] Error in message handler:', handlerError);
+              console.error('[RTM-PERSIST] Error in message handler:', handlerError);
             }
           });
         }
       } catch (error) {
-        console.error('[RTM] Error processing received message:', error);
+        console.error('[RTM-PERSIST] Error processing received message:', error);
       }
     });
     
-    // Add other event listeners
+    // Add presence event listener
     rtmClient.addEventListener("presence", (event: any) => {
-      logRtm(`Presence event on channel ${channelName}:`, event);
+      const session = this.clients.get(sessionKey);
+      if (session) {
+        session.lastActive = Date.now();
+      }
     });
     
+    // Add status event listener with AGGRESSIVE reconnection (like rtm-service.ts)
     rtmClient.addEventListener("status", (event: any) => {
-      logRtm(`Status changed to ${event.state} for ${userId} in channel ${channelName}`);
+      logRtm(`Status: ${event.state} for ${userId}`);
+      
+      const session = this.clients.get(sessionKey);
+      if (session) {
+        session.lastActive = Date.now();
+        
+        // Immediately attempt reconnection on ANY disconnect (like rtm-service.ts)
+        if (event.state === 'DISCONNECTED' || event.state === 'FAILED' || event.state === 'RECONNECTING') {
+          logRtm(`Connection issue for ${userId}, reconnecting immediately...`);
+          this.immediateReconnection(session, sessionKey);
+        } else if (event.state === 'CONNECTED') {
+          session.reconnectAttempts = 0;
+          logRtm(`${userId} connected successfully`);
+        }
+      }
+    });
+
+    // Add error event listener - DON'T disconnect on errors
+    rtmClient.addEventListener("error", (error: any) => {
+      console.error(`[RTM-PERSIST] RTM error for ${userId} (continuing connection):`, error);
+      const session = this.clients.get(sessionKey);
+      if (session) {
+        session.lastActive = Date.now();
+        // Don't reconnect on errors, just log them
+      }
     });
   }
 
   /**
-   * Gets an RTM client, creating a new one if necessary
+   * Immediate reconnection attempt (aggressive like rtm-service.ts)
+   */
+  private async immediateReconnection(session: RTMClientSession, sessionKey: string): Promise<void> {
+    // Unlike the old version, we don't give up - keep trying forever
+    session.reconnectAttempts++;
+    logRtm(`Reconnecting ${session.userId} (attempt ${session.reconnectAttempts})`);
+
+    try {
+      const newRtmClient = await this.createRtmClient(
+        session.appId,
+        session.userId,
+        session.token,
+        session.channelName
+      );
+
+      if (newRtmClient) {
+        // Replace the old client
+        session.rtmClient = newRtmClient;
+        session.lastActive = Date.now();
+        
+        // Set up listeners for the new client
+        this.setupMessageListeners(newRtmClient, session.appId, session.userId, session.channelName);
+        
+        logRtm(`Successfully reconnected ${session.userId}`);
+        session.reconnectAttempts = 0;
+      } else {
+        // Failed to reconnect, try again after delay
+        setTimeout(() => {
+          this.immediateReconnection(session, sessionKey);
+        }, this.reconnectTimeoutMs);
+      }
+    } catch (error) {
+      console.error(`[RTM-PERSIST] Reconnection failed for ${session.userId}:`, error);
+      // Try again after delay
+      setTimeout(() => {
+        this.immediateReconnection(session, sessionKey);
+      }, this.reconnectTimeoutMs);
+    }
+  }
+
+  /**
+   * Create a new RTM client instance
+   */
+  private async createRtmClient(appId: string, userId: string, token: string, channelName: string): Promise<any | null> {
+    try {
+      logRtm(`Creating RTM client for ${userId} in channel ${channelName}`);
+      
+      const rtmClient: any = new (AgoraRTM.RTM)(appId, userId);
+      
+      const loginOptions = token ? { token } : {};
+      
+      await rtmClient.login(loginOptions);
+      logRtm(`Logged in as ${userId}`);
+
+      await rtmClient.subscribe(channelName);
+      logRtm(`Subscribed to channel: ${channelName}`);
+      
+      return rtmClient;
+    } catch (error) {
+      console.error('[RTM-PERSIST] Error creating RTM client:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Gets an RTM client, creating a PERSISTENT one if necessary (like rtm-service.ts)
    */
   public async getOrCreateClient(params: RTMClientParams): Promise<any | null> {
-    // If RTM is not enabled, return null
     if (!params.enable_rtm || !params.agent_rtm_uid || !params.agent_rtm_channel || !params.appId) {
       return null;
     }
 
     const appId = params.appId;
     const userId = params.agent_rtm_uid;
-    const token = params.agent_rtm_token;
+    const token = params.agent_rtm_token || '';
     const channelName = params.agent_rtm_channel;
     const sessionKey = this.getSessionKey(appId, userId, channelName);
 
-    // Check if we already have an active client
+    // Check if we already have a client (reuse forever like rtm-service.ts)
     if (this.clients.has(sessionKey)) {
       const session = this.clients.get(sessionKey)!;
-      session.lastActive = Date.now(); // Update last activity timestamp
-      logRtm(`Reusing existing client for ${userId} in channel ${channelName} (appId: ${appId})`);
+      session.lastActive = Date.now();
+      logRtm(`Reusing PERSISTENT RTM client for ${userId} (active for ${Math.round((Date.now() - session.lastActive)/1000/60)} minutes)`);
       return session.rtmClient;
     }
 
     try {
-      logRtm(`Creating new client for ${userId} in channel ${channelName} (appId: ${appId})`);
+      const rtmClient = await this.createRtmClient(appId, userId, token, channelName);
       
-      // Use the RTM constructor from the AgoraRTM package - explicitly cast as any
-      const rtmClient: any = new (AgoraRTM.RTM)(appId, userId);
-      
-      // Login options
-      const loginOptions = token ? { token } : {};
-      
-      // Login
-      logRtm(`Attempting login for user ${userId}`, loginOptions);
-      await rtmClient.login(loginOptions);
-      logRtm(`Successfully logged in as ${userId}`);
+      if (!rtmClient) {
+        return null;
+      }
 
-      // Subscribe to channel
-      await rtmClient.subscribe(channelName);
-      logRtm(`Subscribed to channel: ${channelName}`);
-      
-      // Create session before setting up listeners
+      // Create PERSISTENT session (never auto-cleanup)
       const session: RTMClientSession = {
         rtmClient,
         lastActive: Date.now(),
         channelName,
         userId,
         appId,
-        messageHandlers: []
+        token,
+        messageHandlers: [],
+        reconnectAttempts: 0,
+        isPersistent: true // NEVER auto-cleanup
       };
       
-      // Store the session
       this.clients.set(sessionKey, session);
-      
-      // Set up message listeners
       this.setupMessageListeners(rtmClient, appId, userId, channelName);
 
+      logRtm(`PERSISTENT RTM client created for ${userId} (will stay online indefinitely)`);
       return rtmClient;
     } catch (error) {
-      console.error('[RTM] Error creating RTM client:', error);
-      // On error, provide more detailed information about the parameters to help debug
-      console.error('[RTM] Failed params:', { 
-        userId,
-        channelName,
-        appId,
-        hasToken: !!token
-      });
+      console.error('[RTM-PERSIST] Error creating persistent RTM client:', error);
       return null;
     }
   }
@@ -221,47 +248,18 @@ class RTMClientManager {
     const session = this.clients.get(sessionKey);
     
     if (!session) {
-      console.error(`[RTM] Cannot add message handler: No active session for ${userId} in channel ${channelName}`);
+      console.error(`[RTM-PERSIST] Cannot add message handler: No session for ${userId}`);
       return false;
     }
     
-    // Add the handler
     session.messageHandlers.push(handler);
-    logRtm(`Added message handler for ${userId} in channel ${channelName} (total: ${session.messageHandlers.length})`);
+    session.lastActive = Date.now();
+    logRtm(`Added message handler for PERSISTENT session ${userId} (total: ${session.messageHandlers.length})`);
     return true;
   }
 
   /**
-   * Removes a message handler for a specific client session
-   */
-  public removeMessageHandler(
-    appId: string,
-    userId: string,
-    channelName: string,
-    handler: RTMMessageHandler
-  ): boolean {
-    const sessionKey = this.getSessionKey(appId, userId, channelName);
-    const session = this.clients.get(sessionKey);
-    
-    if (!session) {
-      console.error(`[RTM] Cannot remove message handler: No active session for ${userId} in channel ${channelName}`);
-      return false;
-    }
-    
-    // Find the handler index
-    const index = session.messageHandlers.indexOf(handler);
-    if (index !== -1) {
-      // Remove the handler
-      session.messageHandlers.splice(index, 1);
-      logRtm(`Removed message handler for ${userId} in channel ${channelName} (remaining: ${session.messageHandlers.length})`);
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Updates the last active timestamp for a session
+   * Updates the last active timestamp (but connection stays persistent)
    */
   public updateLastActive(appId: string, userId: string, channelName: string): void {
     const sessionKey = this.getSessionKey(appId, userId, channelName);
@@ -269,6 +267,7 @@ class RTMClientManager {
     
     if (session) {
       session.lastActive = Date.now();
+      // No cleanup logic - session stays alive indefinitely
     }
   }
 
@@ -285,17 +284,18 @@ class RTMClientManager {
     }
 
     try {
-      const payload = {
-        type: "command",
-        message
-      };
-
-      logRtm(`Sending command to channel ${channelName}:`, message);
-      await rtmClient.publish(channelName, message);// JSON.stringify(payload));
-      logRtm(`Command sent successfully`);
+      await rtmClient.publish(channelName, message);
+      
+      // Update activity for all sessions using this client
+      this.clients.forEach(session => {
+        if (session.rtmClient === rtmClient) {
+          session.lastActive = Date.now();
+        }
+      });
+      
       return true;
     } catch (error) {
-      console.error('[RTM] Error sending message to channel:', error);
+      console.error('[RTM-PERSIST] Error sending message:', error);
       return false;
     }
   }
@@ -303,13 +303,38 @@ class RTMClientManager {
   /**
    * Gets active client session information for debugging
    */
-  public getActiveClients(): { appId: string, userId: string, channelName: string, lastActive: number }[] {
+  public getActiveClients(): { appId: string, userId: string, channelName: string, lastActive: number, isPersistent: boolean, reconnectAttempts: number }[] {
     return Array.from(this.clients.values()).map(session => ({
       appId: session.appId,
       userId: session.userId,
       channelName: session.channelName,
-      lastActive: session.lastActive
+      lastActive: session.lastActive,
+      isPersistent: session.isPersistent,
+      reconnectAttempts: session.reconnectAttempts
     }));
+  }
+
+  /**
+   * Manually disconnect a specific session (explicit logout like rtm-service.ts)
+   */
+  public async disconnectSession(appId: string, userId: string, channelName: string): Promise<boolean> {
+    const sessionKey = this.getSessionKey(appId, userId, channelName);
+    const session = this.clients.get(sessionKey);
+    
+    if (!session) {
+      return false;
+    }
+
+    try {
+      logRtm(`Manually disconnecting PERSISTENT session for ${userId}`);
+      await session.rtmClient.logout();
+      this.clients.delete(sessionKey);
+      logRtm(`Successfully disconnected ${userId}`);
+      return true;
+    } catch (error) {
+      console.error(`[RTM-PERSIST] Error disconnecting ${userId}:`, error);
+      return false;
+    }
   }
 
   public static getInstance(): RTMClientManager {

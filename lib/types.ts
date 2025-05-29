@@ -3,6 +3,9 @@
 
 import type OpenAI from 'openai';
 
+
+
+
 export type ToolResponseCacheItem = {
   toolCallId: string;
   toolName: string;
@@ -25,20 +28,16 @@ export type RTMSessionParams = {
   agent_rtm_channel?: string;
 };
 
-export type EndpointConfig = {
-  // The RAG data specific to this endpoint
+export interface EndpointConfig {
   ragData: Record<string, string>;
-  
-  // The tools available for this endpoint
   tools: OpenAI.ChatCompletionTool[];
-  
-  // Implementation of the tools
-  toolMap: ToolMap;
-  
-  // System message template to use
+  toolMap: Record<string, (appId: string, userId: string, channel: string, args: any) => any>;
   systemMessageTemplate: (ragData: Record<string, string>) => string;
-};
-
+  communicationModes?: {
+    supportsChat?: boolean;      // Enable RTM chat mode
+    endpointMode?: 'voice' | 'video'; // What mode for API calls
+  };
+}
 export type EndpointRequest = {
   messages: any[];
   model?: string;

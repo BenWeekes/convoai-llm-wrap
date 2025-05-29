@@ -1,5 +1,6 @@
-// File: lib/common/endpoint-factory.ts
-// Factory function to create standardized endpoint handlers with multi-pass tool support
+// lib/common/endpoint-factory.ts
+// Factory function to create standardized endpoint handlers with multi-pass tool support and RTM chat integration
+// Enhanced with communication mode support
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
@@ -9,7 +10,9 @@ import { logCacheState, storeToolResponse } from './cache';
 import { insertCachedToolResponses } from './message-processor';
 import { handleModelRequest } from './model-handler';
 import { simplifyMessagesForLlama, isFollowUpWithToolResponsesPresent } from './utils';
+import { getOrCreateConversation, saveMessage } from './conversation-store';
 import rtmClientManager, { RTMClientParams } from './rtm-client-manager';
+import endpointChatManager from './rtm-chat-handler';
 
 const DEFAULT_CHUNK_SIZE = 4096;
 
@@ -201,8 +204,9 @@ function endStream(
 
 /**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
+ * Enhanced with communication mode support
  */
-export function createEndpointHandler(config: EndpointConfig) {
+export function createEndpointHandler(config: EndpointConfig, endpointName?: string) {
   return async function endpointHandler(req: RequestWithJson) {
     try {
       // A) Validate token
@@ -213,10 +217,25 @@ export function createEndpointHandler(config: EndpointConfig) {
         return NextResponse.json(errorResponse, { status: 403 });
       }
 
-      // B) Parse request
-      const body = await req.json();
+      // B) Parse request (handle both GET and POST)
+      let body: any = {};
+      if (req.method === 'POST') {
+        try {
+          body = await req.json();
+        } catch (jsonError) {
+          console.error('❌ Failed to parse JSON body:', jsonError);
+          const errorResponse = { error: 'Invalid JSON in request body' };
+          logFullResponse("ERROR-400", errorResponse);
+          return NextResponse.json(errorResponse, { status: 400 });
+        }
+      } else {
+        // GET request - no body expected, use empty object
+        console.log('📝 GET request received - no body to parse');
+        body = {};
+      }
+
       const {
-        messages,
+        messages: originalMessages = null,
         model = 'gpt-4o-mini',
         baseURL = 'https://api.openai.com/v1',
         apiKey = process.env.OPENAI_API_KEY,
@@ -226,12 +245,36 @@ export function createEndpointHandler(config: EndpointConfig) {
         appId = '',
         simplifiedTools = false,
         stream_options = {},
+        mode = null, // Communication mode parameter (kept for compatibility)
         // RTM parameters
         enable_rtm = false,
         agent_rtm_uid = '',
         agent_rtm_token = '',
         agent_rtm_channel = ''
-      } = body || {};
+      } = body;
+
+      // C) Initialize RTM chat for this endpoint (only if endpointName is provided)
+      if (endpointName) {
+        try {
+          await endpointChatManager.initializeEndpointChat(endpointName, config);
+        } catch (chatInitError) {
+          console.log(`[ENDPOINT] RTM chat initialization failed for ${endpointName}:`, chatInitError);
+          // Continue without chat - this is not a fatal error
+        }
+
+        // D) Check for custom system message and update chat handler BEFORE processing
+        if (originalMessages && Array.isArray(originalMessages) && originalMessages.length > 0 && 
+            originalMessages[0].role === 'system' && appId) {
+          console.log(`[ENDPOINT] Custom system message detected for ${endpointName}, updating chat handler`);
+          endpointChatManager.updateSystemMessage(endpointName, appId, originalMessages[0].content);
+        }
+      }
+
+      // Log communication mode configuration
+      console.log(`[ENDPOINT] Communication mode config for ${endpointName}:`, {
+        supportsChat: config.communicationModes?.supportsChat,
+        endpointMode: config.communicationModes?.endpointMode
+      });
 
       // Gather RTM parameters
       const rtmParams: RTMClientParams = {
@@ -251,7 +294,20 @@ export function createEndpointHandler(config: EndpointConfig) {
       
       logCacheState();
       
-      if (!messages || !Array.isArray(messages)) {
+      // Skip validation for GET requests used for initialization
+      if (req.method === 'GET') {
+        console.log(`[ENDPOINT] GET request for ${endpointName || 'unknown'} - RTM chat initialization complete`);
+        return NextResponse.json({ 
+          message: 'Endpoint initialized successfully',
+          rtm_chat_active: endpointName ? endpointChatManager.isEndpointChatActive(endpointName) : false,
+          communication_modes: {
+            supportsChat: config.communicationModes?.supportsChat || false,
+            endpointMode: config.communicationModes?.endpointMode || null
+          }
+        });
+      }
+      
+      if (!originalMessages || !Array.isArray(originalMessages)) {
         const errorResponse = { error: 'Missing or invalid "messages" in request body' };
         logFullResponse("ERROR-400", errorResponse);
         return NextResponse.json(errorResponse, { status: 400 });
@@ -262,27 +318,105 @@ export function createEndpointHandler(config: EndpointConfig) {
         return NextResponse.json(errorResponse, { status: 400 });
       }
 
-      // C) Create OpenAI client
+      // E) Create OpenAI client
       const openai = new OpenAI({
         apiKey: apiKey,
         baseURL
       });
 
-      // D) Create the system message with RAG data
-      const systemMessage = {
-        role: "system" as const,
-        content: config.systemMessageTemplate(config.ragData)
-      };
+      // F) Prepare messages - handle system message and preserve conversation history with mode support
+      let systemMessage: any;
+      let requestMessages: any[];
       
-      // Process messages and insert cached tool responses if needed
-      const processedMessages = insertCachedToolResponses(messages);
+      // Extract system message if present
+      if (originalMessages.length > 0 && originalMessages[0].role === 'system') {
+        systemMessage = {
+          role: "system" as const,
+          content: originalMessages[0].content
+        };
+        requestMessages = originalMessages.slice(1); // Remove system message from request messages
+      } else {
+        systemMessage = {
+          role: "system" as const,
+          content: config.systemMessageTemplate(config.ragData)
+        };
+        requestMessages = originalMessages;
+      }
       
-      // Prepare final messages
-      let finalMessages = [systemMessage, ...processedMessages];
+      // Add mode information to request messages only if endpoint has a specified mode
+      const endpointMode = config.communicationModes?.endpointMode;
+      const supportsChat = config.communicationModes?.supportsChat || false;
+      
+      const processedMessages = endpointMode 
+        ? requestMessages.map(msg => ({
+            ...msg,
+            mode: endpointMode // 'voice' or 'video'
+          }))
+        : requestMessages; // No mode if not configured
+      
+      // Get existing conversation to preserve history
+      const existingConversation = await getOrCreateConversation(appId, userId);
+      console.log(`[ENDPOINT] Found existing conversation with ${existingConversation.messages.length} messages`);
+      
+      // Process request messages and insert cached tool responses if needed
+      const processedRequestMessages = insertCachedToolResponses(processedMessages);
+      
+      // Add current mode context only if modes are configured - just mode info
+      let currentModeContext = '';
+      if (endpointMode || supportsChat) {
+        const currentRequestMode = endpointMode; // This request is always the endpoint mode
+        
+        if (currentRequestMode === 'video') {
+          currentModeContext = `
+
+CURRENT COMMUNICATION MODE: VIDEO (user is on video call with you right now - they can see and hear you)
+AVAILABLE MODES: ${supportsChat ? 'chat, video' : 'video'}`;
+        } else if (currentRequestMode === 'voice') {
+          currentModeContext = `
+
+CURRENT COMMUNICATION MODE: VOICE (user is on voice call with you right now - they can hear you)
+AVAILABLE MODES: ${supportsChat ? 'chat, voice' : 'voice'}`;
+        } else if (supportsChat) {
+          // No endpoint mode configured, but chat is supported
+          currentModeContext = `
+
+CURRENT COMMUNICATION MODE: UNKNOWN (check message "mode" field for context)
+AVAILABLE MODES: chat`;
+        }
+      }
+      
+      // Update system message with current mode context (only if context was generated)
+      if (currentModeContext) {
+        systemMessage.content += currentModeContext;
+      }
+      
+      // Prepare final messages - PRESERVE existing conversation history
+      let finalMessages: any[];
+      if (existingConversation.messages.length > 0) {
+        // We have existing conversation - preserve it and append new messages
+        const existingWithoutSystem = existingConversation.messages.filter(msg => msg.role !== 'system');
+        finalMessages = [systemMessage, ...existingWithoutSystem, ...processedRequestMessages];
+        console.log(`[ENDPOINT] Preserving ${existingWithoutSystem.length} existing messages + ${processedRequestMessages.length} new ${endpointMode || 'unspecified'} messages`);
+      } else {
+        // No existing conversation
+        finalMessages = [systemMessage, ...processedRequestMessages];
+      }
+
+      // Save user messages to conversation with mode information
+      for (const message of processedRequestMessages) {
+        if (message.role === 'user') {
+          await saveMessage(appId, userId, {
+            role: 'user',
+            content: message.content,
+            mode: endpointMode // Add mode if specified
+          });
+        }
+      }
 
       // Check if simplification is needed based on message context
-      if (isFollowUpWithToolResponsesPresent(processedMessages)) {
-        finalMessages = [systemMessage, ...simplifyMessagesForLlama(processedMessages)];
+      if (isFollowUpWithToolResponsesPresent(processedRequestMessages)) {
+        const existingWithoutSystem = existingConversation.messages.filter(msg => msg.role !== 'system');
+        finalMessages = [systemMessage, ...simplifyMessagesForLlama([...existingWithoutSystem, ...processedRequestMessages])];
       }
 
       // Common request parameters
@@ -301,7 +435,7 @@ export function createEndpointHandler(config: EndpointConfig) {
       console.info('🔧 Common request params (stream=false for tool detection):');
       console.dir(commonRequestParams, { depth: null, colors: true });
 
-      // F) Handle the request based on streaming preference
+      // G) Handle the request based on streaming preference
       if (stream) {
         try {
           // Set up streaming parameters
@@ -310,12 +444,13 @@ export function createEndpointHandler(config: EndpointConfig) {
           // Make the request with error handling
           const streamingResponse = await handleModelRequest(openai, streamParams);
 
-          // G) For streaming, process async iterator of ChatCompletionChunk
+          // H) For streaming, process async iterator of ChatCompletionChunk
           const encoder = new TextEncoder();
 
           // We'll merge partial tool call fragments into a single object.
           let accumulatedToolCall: any = null;
           let toolExecuted = false;
+          let accumulatedContent = '';
           const controllerClosed = { value: false };
           
           // Track chunks sent to client for logging
@@ -390,6 +525,9 @@ export function createEndpointHandler(config: EndpointConfig) {
                   
                   // Handle content with command extraction
                   if (delta?.content) {
+                    // Accumulate content for conversation saving
+                    accumulatedContent += delta.content;
+                    
                     // Create a copy of the part that we can modify
                     const modifiedPart = JSON.parse(JSON.stringify(part));
                     let modifiedContent = '';
@@ -481,6 +619,15 @@ export function createEndpointHandler(config: EndpointConfig) {
                       console.log(`🤷 No accumulated tool call to execute`);
                       toolExecuted = true;
                       
+                      // Save assistant response to conversation with mode
+                      if (accumulatedContent.trim()) {
+                        await saveMessage(appId, userId, {
+                          role: 'assistant',
+                          content: accumulatedContent.trim(),
+                          mode: endpointMode // Add mode if specified
+                        });
+                      }
+                      
                       // Process any pending commands
                       if (inCommand && commandBuffer.length > 0) {
                         if (rtmClient && enable_rtm && agent_rtm_channel) {
@@ -502,6 +649,15 @@ export function createEndpointHandler(config: EndpointConfig) {
                 
                 // End of stream reached without finish_reason
                 console.log(`🏁 END OF STREAM - no finish_reason detected`);
+                
+                // Save assistant response to conversation with mode
+                if (accumulatedContent.trim()) {
+                  await saveMessage(appId, userId, {
+                    role: 'assistant',
+                    content: accumulatedContent.trim(),
+                    mode: endpointMode // Add mode if specified
+                  });
+                }
                 
                 // Process any remaining command
                 if (inCommand && commandBuffer.length > 0) {
@@ -658,6 +814,15 @@ export function createEndpointHandler(config: EndpointConfig) {
         // finalResp has the last pass's text
         if (!finalResp) {
           return NextResponse.json({ error: 'No LLM response.' }, { status: 500 });
+        }
+
+        // Save assistant response to conversation with mode
+        if (accumulatedText.trim()) {
+          await saveMessage(appId, userId, {
+            role: 'assistant',
+            content: accumulatedText.trim(),
+            mode: endpointMode // Add mode if specified
+          });
         }
 
         // Extract commands from the final response text (if RTM is enabled)

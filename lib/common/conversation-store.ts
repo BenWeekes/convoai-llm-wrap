@@ -1,4 +1,5 @@
 // lib/common/conversation-store.ts
+// Enhanced with communication mode support while preserving existing functionality
 
 // Define the interfaces
 export interface Message {
@@ -7,6 +8,8 @@ export interface Message {
   name?: string;
   tool_calls?: any[];
   tool_call_id?: string;
+  mode?: 'chat' | 'voice' | 'video'; // NEW: Add mode support
+  timestamp?: number; // NEW: Add timestamp support
 }
 
 export interface Conversation {
@@ -54,9 +57,14 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
 }
 
 /**
- * Saves a message to the conversation
+ * Saves a message to the conversation - Enhanced with mode support
  */
-export async function saveMessage(appId: string, userId: string, message: Message): Promise<void> {
+export async function saveMessage(appId: string, userId: string, message: Message | {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  mode?: 'chat' | 'voice' | 'video';
+  timestamp?: number;
+}): Promise<void> {
   const conversation = await getOrCreateConversation(appId, userId);
   
   // Trim conversation if it's getting too long
@@ -74,11 +82,23 @@ export async function saveMessage(appId: string, userId: string, message: Messag
     conversation.messages = [...systemMessages, ...recentMessages];
   }
   
+  // Enhanced message with timestamp and mode support
+  const enhancedMessage: Message = {
+    ...message,
+    timestamp: message.timestamp || Date.now()
+  };
+  
+  // Only add mode if specified
+  if ('mode' in message && message.mode) {
+    enhancedMessage.mode = message.mode;
+  }
+  
   // Add the new message
-  conversation.messages.push(message);
+  conversation.messages.push(enhancedMessage);
   conversation.lastUpdated = Date.now();
   
-  console.log(`[CONVERSATION] Saved ${message.role} message for ${userId}. Conversation now has ${conversation.messages.length} messages`);
+  const modeInfo = enhancedMessage.mode ? ` (${enhancedMessage.mode} mode)` : '';
+  console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo} for ${userId}. Conversation now has ${conversation.messages.length} messages`);
 }
 
 /**
@@ -109,7 +129,7 @@ export function getAllConversations(): Record<string, Conversation> {
 }
 
 /**
- * Gets conversation statistics
+ * Gets conversation statistics - Enhanced with mode information
  */
 export function getConversationStats(): any {
   const totalConversations = Object.keys(conversationStore).length;
@@ -117,20 +137,47 @@ export function getConversationStats(): any {
   let oldestConversationAge = 0;
   const now = Date.now();
   
+  // Track mode statistics
+  const modeStats = {
+    chat: 0,
+    voice: 0,
+    video: 0,
+    unspecified: 0
+  };
+  
   Object.values(conversationStore).forEach(convo => {
     totalMessages += convo.messages.length;
     const age = now - convo.lastUpdated;
     if (age > oldestConversationAge) {
       oldestConversationAge = age;
     }
+    
+    // Count messages by mode
+    convo.messages.forEach(msg => {
+      if (msg.mode === 'chat') modeStats.chat++;
+      else if (msg.mode === 'voice') modeStats.voice++;
+      else if (msg.mode === 'video') modeStats.video++;
+      else modeStats.unspecified++;
+    });
   });
   
   return {
     totalConversations,
     totalMessages,
     oldestConversationAgeHours: oldestConversationAge / (60 * 60 * 1000),
-    averageMessagesPerConversation: totalConversations ? totalMessages / totalConversations : 0
+    averageMessagesPerConversation: totalConversations ? totalMessages / totalConversations : 0,
+    messagesByMode: modeStats
   };
+}
+
+/**
+ * Clear all conversations (for testing/debugging)
+ */
+export async function clearAllConversations(): Promise<void> {
+  Object.keys(conversationStore).forEach(key => {
+    delete conversationStore[key];
+  });
+  console.log('[CONVERSATION] Cleared all conversations');
 }
 
 // Set up cleanup interval for old conversations
@@ -143,6 +190,6 @@ if (typeof window === 'undefined') { // Only run on server
     }
   }, CLEANUP_INTERVAL_MS);
   
-  console.log('[CONVERSATION] Conversation store initialized, cleanup scheduled every', 
+  console.log('[CONVERSATION] Conversation store initialized with mode support, cleanup scheduled every', 
     CLEANUP_INTERVAL_MS / (60 * 1000), 'minutes');
 }

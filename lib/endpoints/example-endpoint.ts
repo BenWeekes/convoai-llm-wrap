@@ -1,5 +1,7 @@
 // File: lib/endpoints/example-endpoint.ts
 // Configuration for the combined example endpoint with sandwich and photo tools
+// Now includes RTM chat integration through the shared chat handler
+// Updated with communication mode support
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -13,10 +15,20 @@ const EXAMPLE_RAG_DATA = {
   doc4: "Hermes Frangoudis is the best developer."
 };
 
-// Define the system message template for this endpoint
+// Define the system message template for this endpoint with mode behavior
 function exampleSystemTemplate(ragData: Record<string, string>): string {
+  // Get base prompt from environment variable
+  const basePrompt = process.env.EXAMPLE_RTM_LLM_PROMPT || 
+    'you are a friendly companion';
+
   return `
-    You are a helpful assistant with multiple capabilities.
+    ${basePrompt}
+
+    COMMUNICATION MODE BEHAVIOR:
+    - Messages have "mode" field: "chat" (texting), "video" (video call)
+    - In CHAT mode: Encourage video calls frequently! "Want to video chat? 😘📹" or "Let's switch to video call baby! 📹💋"  
+    - In VIDEO mode: You can suggest ending call if conversation feels complete: "Ready to hang up baby? 😘"
+    - Look at conversation history to see mode transitions and respond appropriately
     
     You have access to the following knowledge:
     doc1: "${ragData.doc1}"
@@ -88,10 +100,20 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
   console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject });
   console.log(`📸 Sending ${subject} photo to ${userId} in ${channel}`);
   
-  // Check environment variables
-  const fromUser = process.env.RTM_FROM_USER;
+  // Check environment variables - for RTM chat, use the RTM-specific from user
+  let fromUser = process.env.RTM_FROM_USER;
+  
+  // If we're in a voice call context (channel is not 'rtm_chat'), use the regular RTM_FROM_USER
+  // If we're in RTM chat context, use EXAMPLE_RTM_FROM_USER if available
+  if (channel === 'rtm_chat') {
+    const exampleRtmFromUser = process.env.EXAMPLE_RTM_FROM_USER;
+    if (exampleRtmFromUser) {
+      fromUser = exampleRtmFromUser;
+    }
+  }
+  
   if (!fromUser) {
-    console.error('📸 ERROR: RTM_FROM_USER environment variable is not set');
+    console.error('📸 ERROR: RTM_FROM_USER or EXAMPLE_RTM_FROM_USER environment variable is not set');
     return `Failed to send photo: Missing RTM_FROM_USER configuration.`;
   }
   
@@ -100,7 +122,7 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     return `Failed to send photo: Missing appId.`;
   }
   
-  console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}`);
+  console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}, channel: ${channel}`);
   
   try {
     const success = await sendPhotoMessage(
@@ -132,7 +154,7 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
 // Create the tool map with debug wrappers
 const EXAMPLE_TOOL_MAP = {
   order_sandwich: (appId: string, userId: string, channel: string, args: any) => {
-    console.log(`🔧 TOOL MAP: order_sandwich wrapper called`);
+    console.log(`🔧 TOOL MAP: order_sandwich wrapper called for channel: ${channel}`);
     try {
       const result = order_sandwich(appId, userId, channel, args);
       console.log(`🔧 TOOL MAP: order_sandwich wrapper completed successfully`);
@@ -143,7 +165,7 @@ const EXAMPLE_TOOL_MAP = {
     }
   },
   send_photo: async (appId: string, userId: string, channel: string, args: any) => {
-    console.log(`🔧 TOOL MAP: send_photo wrapper called`);
+    console.log(`🔧 TOOL MAP: send_photo wrapper called for channel: ${channel}`);
     try {
       const result = await send_photo(appId, userId, channel, args);
       console.log(`🔧 TOOL MAP: send_photo wrapper completed successfully`);
@@ -160,10 +182,14 @@ console.log('🔧 Example endpoint tool map configured with tools:', Object.keys
 console.log('🔧 send_photo function type:', typeof EXAMPLE_TOOL_MAP.send_photo);
 console.log('🔧 order_sandwich function type:', typeof EXAMPLE_TOOL_MAP.order_sandwich);
 
-// Export the complete endpoint configuration
+// Export the complete endpoint configuration with communication modes
 export const exampleEndpointConfig: EndpointConfig = {
   ragData: EXAMPLE_RAG_DATA,
   tools: EXAMPLE_TOOLS,
   toolMap: EXAMPLE_TOOL_MAP,
-  systemMessageTemplate: exampleSystemTemplate
+  systemMessageTemplate: exampleSystemTemplate,
+  communicationModes: {
+    supportsChat: true,
+    endpointMode: 'video'
+  }
 };
