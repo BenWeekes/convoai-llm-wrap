@@ -1,8 +1,8 @@
 // lib/services/rtm-service.ts
-// Enhanced with configurable debug logging for RTM interactions
+// Enhanced with mode context like the video endpoint
 
 import AgoraRTM from 'rtm-nodejs';
-import { getOrCreateConversation, saveMessage } from '../common/conversation-store';
+import { getOrCreateConversation, saveMessage, detectModeTransition } from '../common/conversation-store';
 import { handleModelRequest } from '../common/model-handler';
 import { exampleEndpointConfig } from '../endpoints/example-endpoint';
 import { logRTMMessageProcessing, logLLMRequest, logLLMResponse, logModeTransition } from '../common/utils';
@@ -62,20 +62,6 @@ class RTMService {
       await this.rtmClient.login(options);
       console.log(`[RTM] Successfully logged in as ${userId}`);
       
-      /*
-      // Subscribe to channel
-      await this.rtmClient.subscribe(this.channelName);
-      console.log(`[RTM] Subscribed to channel: ${this.channelName}`);
-      
-      // Send a startup message
-      const startupPayload = {
-        type: "text",
-        message: `RTM service initialized and listening on channel ${this.channelName}`
-      };
-      
-      await this.rtmClient.publish(this.channelName, JSON.stringify(startupPayload));
-      */
-
       this.initialized = true;
       return true;
     } catch (error) {
@@ -130,6 +116,10 @@ class RTMService {
         // Get or create conversation
         const conversation = await getOrCreateConversation(appId, userId);
         
+        // DETECT MODE TRANSITION - Check if user just came from video
+        const modeTransition = detectModeTransition(conversation);
+        console.log(`[RTM] Mode transition analysis:`, modeTransition);
+        
         // Add user message with CHAT mode
         await saveMessage(appId, userId, {
           role: 'user',
@@ -149,25 +139,44 @@ class RTMService {
         const updatedConversation = await getOrCreateConversation(appId, userId);
         let messages = updatedConversation.messages;
         
-        // Add system message if not present
-        if (!messages.some(msg => msg.role === 'system')) {
-          const systemContent = process.env.RTM_LLM_PROMPT || 
-            exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData);
-          
-          // Add chat mode context to system message
-          const chatModeContext = `
+        // Create system message with mode context (like video endpoint does)
+        let systemContent = process.env.RTM_LLM_PROMPT || 
+          exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData);
+        
+        // ADD CURRENT MODE CONTEXT (like endpoint-factory.ts does)
+        let currentModeContext = `
 
-CURRENT COMMUNICATION MODE: CHAT (user is texting you via RTM)
+CURRENT COMMUNICATION MODE: CHAT (user is texting you via RTM - they can only see text)
 AVAILABLE MODES: chat, video`;
-          
+
+        // ENHANCE context if user just came from video call
+        if (modeTransition.possibleHangup) {
+          console.log(`[RTM] 🔥 HANGUP DETECTED - User switched from ${modeTransition.lastAssistantMode} to chat`);
+          currentModeContext += `
+
+IMPORTANT: User was just on ${modeTransition.lastAssistantMode?.toUpperCase()} call with you but has now switched back to chat. Acknowledge this transition naturally.`;
+        }
+        
+        // Add mode context to system message
+        systemContent += currentModeContext;
+        
+        // Add system message if not present, or ensure it has mode context
+        if (!messages.some(msg => msg.role === 'system')) {
           messages = [
             {
               role: 'system',
-              content: systemContent + chatModeContext,
+              content: systemContent,
               mode: 'chat'
             },
             ...messages
           ];
+        } else {
+          // Update existing system message with current mode context
+          messages = messages.map(msg => 
+            msg.role === 'system' 
+              ? { ...msg, content: systemContent, mode: 'chat' }
+              : msg
+          );
         }
         
         // Create request parameters
@@ -178,8 +187,8 @@ AVAILABLE MODES: chat, video`;
           tool_choice: 'auto'
         };
         
-        // LOG THE RTM LLM REQUEST
-        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT`);
+        // LOG THE RTM LLM REQUEST (now with mode context)
+        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT WITH MODE CONTEXT`);
         logLLMRequest(requestParams, {
           userId,
           appId,

@@ -67,7 +67,9 @@ const EXAMPLE_TOOLS: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "send_photo",
       description: "Request a photo be sent to the user.",
+      
       parameters: {
+        /*
         type: "object",
         properties: {
           subject: {
@@ -76,6 +78,7 @@ const EXAMPLE_TOOLS: OpenAI.ChatCompletionTool[] = [
           }
         },
         required: ["subject"]
+        */
       }
     }
   }
@@ -96,21 +99,12 @@ function order_sandwich(appId: string, userId: string, channel: string, args: an
 
 async function send_photo(appId: string, userId: string, channel: string, args: any): Promise<string> {
   const subject = args.subject || "default";
-  
+
   console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject });
   console.log(`📸 Sending ${subject} photo to ${userId} in ${channel}`);
   
   // Check environment variables - for RTM chat, use the RTM-specific from user
   let fromUser = process.env.RTM_FROM_USER;
-  
-  // If we're in a voice call context (channel is not 'rtm_chat'), use the regular RTM_FROM_USER
-  // If we're in RTM chat context, use EXAMPLE_RTM_FROM_USER if available
-  if (channel === 'rtm_chat') {
-    const exampleRtmFromUser = process.env.EXAMPLE_RTM_FROM_USER;
-    if (exampleRtmFromUser) {
-      fromUser = exampleRtmFromUser;
-    }
-  }
   
   if (!fromUser) {
     console.error('📸 ERROR: RTM_FROM_USER or EXAMPLE_RTM_FROM_USER environment variable is not set');
@@ -121,6 +115,12 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     console.error('📸 ERROR: appId is missing');
     return `Failed to send photo: Missing appId.`;
   }
+
+  // Map different photo types to different placeholder images
+//  let imageUrl = "https://sa-utils.agora.io/mms/kierap.png";
+    let imageUrl = "https://sa-utils.agora.io/mms/april_reach_camera.png";
+  
+
   
   console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}, channel: ${channel}`);
   
@@ -129,7 +129,7 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
       appId, 
       fromUser, 
       userId,
-      subject
+      imageUrl
     );
     
     let result: string;

@@ -70,26 +70,18 @@ export async function sendPeerMessage(
   }
 }
 
-/**
- * Sends a photo to a user via peer messaging
- * 
- * @param appId - The Agora application ID
- * @param fromUser - The sender's user ID
- * @param toUser - The recipient's user ID
- * @param photoType - The type of photo to send
- * @returns Promise<boolean> - Success status of the send operation
- */
+
 export async function sendPhotoMessage(
   appId: string,
   fromUser: string, 
   toUser: string,
-  photoType: string = "default"
+  imageUrl: string 
 ): Promise<boolean> {
   console.log(`📸 sendPhotoMessage called with:`, {
     appId,
     fromUser,
     toUser,
-    photoType
+    imageUrl
   });
 
   // Check required environment variables
@@ -98,23 +90,10 @@ export async function sendPhotoMessage(
     return false;
   }
 
-  // Map different photo types to different placeholder images
-  let imageUrl = "https://sa-utils.agora.io/mms/kierap.png";
-  
-  /*
-  if (photoType === "portrait") {
-    imageUrl = "https://sa-utils.agora.io/mms/portrait.png";
-  } else if (photoType === "landscape") {
-    imageUrl = "https://sa-utils.agora.io/mms/landscape.png";
-  } else if (photoType === "product") {
-    imageUrl = "https://sa-utils.agora.io/mms/product.png";
-  } else if (photoType === "face") {
-    imageUrl = "https://sa-utils.agora.io/mms/kierap.png";
-  }*/
   
   const payload = JSON.stringify({ img: imageUrl });
   console.log(`📸 Sending photo payload:`, payload);
-  
+  await new Promise(r => setTimeout(r, 1000));
   try {
     const result = await sendPeerMessage(appId, fromUser, toUser, payload);
     console.log(`📸 sendPhotoMessage result:`, result);
