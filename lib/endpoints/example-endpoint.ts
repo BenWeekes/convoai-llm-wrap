@@ -1,7 +1,7 @@
 // File: lib/endpoints/example-endpoint.ts
 // Configuration for the combined example endpoint with sandwich and photo tools
 // Now includes RTM chat integration through the shared chat handler
-// Updated with communication mode support
+// Updated with communication mode support and randomized photos
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -84,6 +84,16 @@ const EXAMPLE_TOOLS: OpenAI.ChatCompletionTool[] = [
   }
 ];
 
+// Available photo options for randomization
+const PHOTO_OPTIONS = [
+  "april_sit_kiss.png",
+  "april_sit_smile.png", 
+  "april_reach_camera.png",
+  "april_lie_wink.png",
+  "april_lie_smile.png",
+  "april_lie_kiss.png"
+];
+
 // Implement the tool functions with enhanced logging
 function order_sandwich(appId: string, userId: string, channel: string, args: any): string {
   const filling = args.filling || "Unknown";
@@ -116,28 +126,31 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     return `Failed to send photo: Missing appId.`;
   }
 
-  // Map different photo types to different placeholder images
-//  let imageUrl = "https://sa-utils.agora.io/mms/kierap.png";
-    let imageUrl = "https://sa-utils.agora.io/mms/april_reach_camera.png";
+  // Randomize photo selection from available options
+  const randomIndex = Math.floor(Math.random() * PHOTO_OPTIONS.length);
+  const selectedPhoto = PHOTO_OPTIONS[randomIndex];
+  const imageUrl = `https://sa-utils.agora.io/mms/${selectedPhoto}`;
   
-
-  
+  console.log(`📸 Randomly selected photo: ${selectedPhoto} (${randomIndex + 1}/${PHOTO_OPTIONS.length})`);
+  console.log(`📸 Full image URL: ${imageUrl}`);
   console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}, channel: ${channel}`);
   
   try {
+    // Send photo with 3 second delay (non-blocking)
     const success = await sendPhotoMessage(
       appId, 
       fromUser, 
       userId,
-      imageUrl
+      imageUrl,
+      3000  // 3 second delay
     );
     
     let result: string;
     if (success) {
-      result = `Photo of ${subject} sent successfully. You should receive it momentarily.`;
+      result = `Sending you a photo! 📸 (${selectedPhoto.replace('.png', '').replace('april_', '').replace('_', ' ')}) - it'll arrive in a moment!`;
       console.log(`📸 SUCCESS: ${result}`);
     } else {
-      result = `We encountered an issue sending the ${subject} photo. Please try again later.`;
+      result = `We encountered an issue scheduling the photo. Please try again later.`;
       console.log(`📸 FAILURE: ${result}`);
     }
     
@@ -181,6 +194,7 @@ const EXAMPLE_TOOL_MAP = {
 console.log('🔧 Example endpoint tool map configured with tools:', Object.keys(EXAMPLE_TOOL_MAP));
 console.log('🔧 send_photo function type:', typeof EXAMPLE_TOOL_MAP.send_photo);
 console.log('🔧 order_sandwich function type:', typeof EXAMPLE_TOOL_MAP.order_sandwich);
+console.log('📸 Available photo options:', PHOTO_OPTIONS);
 
 // Export the complete endpoint configuration with communication modes
 export const exampleEndpointConfig: EndpointConfig = {

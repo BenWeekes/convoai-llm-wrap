@@ -1,6 +1,6 @@
 // lib/common/endpoint-factory.ts
-// Factory function to create standardized endpoint handlers with multi-pass tool support and RTM chat integration
-// Enhanced with communication mode support and configurable debug logging
+// Factory function to create standardized endpoint handlers
+// Simplified to use only mode property (chat = RTM, voice/video = endpoints)
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
@@ -13,8 +13,6 @@ import { simplifyMessagesForLlama, isFollowUpWithToolResponsesPresent } from './
 import { getOrCreateConversation, saveMessage } from './conversation-store';
 import rtmClientManager, { RTMClientParams } from './rtm-client-manager';
 import endpointChatManager from './rtm-chat-handler';
-
-const DEFAULT_CHUNK_SIZE = 4096;
 
 /**
  * Helper function to execute tool and handle final response
@@ -226,7 +224,7 @@ function endStream(
 
 /**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
- * Enhanced with communication mode support and debug logging
+ * Simplified to use only mode property (chat = RTM, voice/video = endpoints)
  */
 export function createEndpointHandler(config: EndpointConfig, endpointName?: string) {
   return async function endpointHandler(req: RequestWithJson) {
@@ -346,11 +344,11 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         baseURL
       });
 
-      // F) Prepare messages - handle system message and preserve conversation history with mode support
+      // F) Prepare messages - simplified system message handling based on mode
       let systemMessage: any;
       let requestMessages: any[];
       
-      // Extract system message if present
+      // Extract system message if present in request
       if (originalMessages.length > 0 && originalMessages[0].role === 'system') {
         systemMessage = {
           role: "system" as const,
@@ -358,6 +356,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         };
         requestMessages = originalMessages.slice(1); // Remove system message from request messages
       } else {
+        // Create default system message
         systemMessage = {
           role: "system" as const,
           content: config.systemMessageTemplate(config.ragData)
@@ -365,14 +364,14 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         requestMessages = originalMessages;
       }
       
-      // Add mode information to request messages only if endpoint has a specified mode
+      // Add mode information to request messages - endpoints are always voice/video
       const endpointMode = config.communicationModes?.endpointMode;
       const supportsChat = config.communicationModes?.supportsChat || false;
       
       const processedMessages = endpointMode 
         ? requestMessages.map(msg => ({
             ...msg,
-            mode: endpointMode // 'voice' or 'video'
+            mode: endpointMode // 'voice' or 'video' - endpoints never use 'chat'
           }))
         : requestMessages; // No mode if not configured
       
@@ -383,7 +382,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       // Process request messages and insert cached tool responses if needed
       const processedRequestMessages = insertCachedToolResponses(processedMessages);
       
-      // Add current mode context only if modes are configured - just mode info
+      // Add current mode context only if modes are configured
       let currentModeContext = '';
       if (endpointMode || supportsChat) {
         const currentRequestMode = endpointMode; // This request is always the endpoint mode
@@ -412,17 +411,32 @@ AVAILABLE MODES: chat`;
         systemMessage.content += currentModeContext;
       }
       
-      // Prepare final messages - PRESERVE existing conversation history
+      // SIMPLIFIED SYSTEM MESSAGE MANAGEMENT - Let conversation store handle it based on mode
+      console.log(`[ENDPOINT] Managing system message for ${userId} (endpoint mode: ${endpointMode || 'none'})`);
+      
+      // Save the system message - conversation store will manage duplicates based on mode
+      await saveMessage(appId, userId, {
+        role: 'system',
+        content: systemMessage.content,
+        mode: endpointMode // voice/video for endpoints
+      });
+      
+      // Prepare final messages - get the managed conversation
+      const managedConversation = await getOrCreateConversation(appId, userId);
       let finalMessages: any[];
-      if (existingConversation.messages.length > 0) {
-        // We have existing conversation - preserve it and append new messages
-        const existingWithoutSystem = existingConversation.messages.filter(msg => msg.role !== 'system');
-        finalMessages = [systemMessage, ...existingWithoutSystem, ...processedRequestMessages];
-        console.log(`[ENDPOINT] Preserving ${existingWithoutSystem.length} existing messages + ${processedRequestMessages.length} new ${endpointMode || 'unspecified'} messages`);
-      } else {
-        // No existing conversation
-        finalMessages = [systemMessage, ...processedRequestMessages];
-      }
+      
+      // The conversation store has already managed the system message, so we just append new messages
+      const existingMessagesWithoutCurrent = managedConversation.messages.filter(msg => 
+        !(processedRequestMessages.some(reqMsg => 
+          reqMsg.role === msg.role && 
+          reqMsg.content === msg.content && 
+          Math.abs((msg.timestamp || 0) - Date.now()) < 5000 // Within 5 seconds
+        ))
+      );
+      
+      finalMessages = [...existingMessagesWithoutCurrent, ...processedRequestMessages];
+      
+      console.log(`[ENDPOINT] Final message count: ${finalMessages.length} (${existingMessagesWithoutCurrent.length} existing + ${processedRequestMessages.length} new)`);
 
       // Save user messages to conversation with mode information
       for (const message of processedRequestMessages) {
@@ -440,7 +454,7 @@ AVAILABLE MODES: chat`;
           await saveMessage(appId, userId, {
             role: 'user',
             content: message.content,
-            mode: endpointMode // Add mode if specified
+            mode: endpointMode // Add mode if specified (voice/video for endpoints)
           });
         }
       }
@@ -648,7 +662,7 @@ AVAILABLE MODES: chat`;
                     }
                   }
 
-                  // FIXED: Process finish_reason and check for accumulated tool calls
+                  // Process finish_reason and check for accumulated tool calls
                   if (chunk?.finish_reason && !toolExecuted) {
                     console.log(`🏁 FINISH REASON DETECTED: ${chunk.finish_reason}`);
                     console.log(`🔧 Checking for accumulated tool call: ${!!accumulatedToolCall}`);
@@ -691,7 +705,7 @@ AVAILABLE MODES: chat`;
                         await saveMessage(appId, userId, {
                           role: 'assistant',
                           content: accumulatedContent.trim(),
-                          mode: endpointMode // Add mode if specified
+                          mode: endpointMode // Add mode if specified (voice/video for endpoints)
                         });
                       }
                       
@@ -726,7 +740,7 @@ AVAILABLE MODES: chat`;
                   await saveMessage(appId, userId, {
                     role: 'assistant',
                     content: accumulatedContent.trim(),
-                    mode: endpointMode // Add mode if specified
+                    mode: endpointMode // Add mode if specified (voice/video for endpoints)
                   });
                 }
                 
@@ -917,7 +931,7 @@ AVAILABLE MODES: chat`;
           await saveMessage(appId, userId, {
             role: 'assistant',
             content: accumulatedText.trim(),
-            mode: endpointMode // Add mode if specified
+            mode: endpointMode // Add mode if specified (voice/video for endpoints)
           });
         }
 

@@ -1,5 +1,5 @@
 // File: lib/common/messaging-utils.ts
-// Common messaging utilities that can be used across endpoints
+// Common messaging utilities with proper photo delay handling
 
 import axios from 'axios';
 
@@ -70,18 +70,29 @@ export async function sendPeerMessage(
   }
 }
 
-
+/**
+ * Sends a photo message with configurable delay (non-blocking)
+ * 
+ * @param appId - The Agora application ID
+ * @param fromUser - The sender's user ID  
+ * @param toUser - The recipient's user ID
+ * @param imageUrl - The URL of the image to send
+ * @param delayMs - Delay in milliseconds before sending (default: 3000ms)
+ * @returns Promise<boolean> - Resolves immediately with true (actual send happens after delay)
+ */
 export async function sendPhotoMessage(
   appId: string,
   fromUser: string, 
   toUser: string,
-  imageUrl: string 
+  imageUrl: string,
+  delayMs: number = 3000
 ): Promise<boolean> {
   console.log(`📸 sendPhotoMessage called with:`, {
     appId,
     fromUser,
     toUser,
-    imageUrl
+    imageUrl,
+    delayMs
   });
 
   // Check required environment variables
@@ -90,16 +101,39 @@ export async function sendPhotoMessage(
     return false;
   }
 
-  
   const payload = JSON.stringify({ img: imageUrl });
-  console.log(`📸 Sending photo payload:`, payload);
-  await new Promise(r => setTimeout(r, 1000));
-  try {
-    const result = await sendPeerMessage(appId, fromUser, toUser, payload);
-    console.log(`📸 sendPhotoMessage result:`, result);
-    return result;
-  } catch (error) {
-    console.error('📸 sendPhotoMessage error:', error);
-    return false;
-  }
+  console.log(`📸 Scheduling photo with ${delayMs}ms delay:`, payload);
+  
+  // Schedule the photo to be sent after delay (non-blocking)
+  setTimeout(async () => {
+    try {
+      console.log(`📸 Sending delayed photo to ${toUser} (delay: ${delayMs}ms)`);
+      const result = await sendPeerMessage(appId, fromUser, toUser, payload);
+      
+      if (result) {
+        console.log(`📸 ✅ Delayed photo sent successfully to ${toUser}`);
+      } else {
+        console.log(`📸 ❌ Failed to send delayed photo to ${toUser}`);
+      }
+    } catch (error) {
+      console.error(`📸 ❌ Error sending delayed photo to ${toUser}:`, error);
+    }
+  }, delayMs);
+  
+  console.log(`📸 Photo scheduled for ${toUser} (will send in ${delayMs}ms)`);
+  
+  // Return true immediately - the actual sending happens asynchronously
+  return true;
+}
+
+/**
+ * Sends a photo message immediately (for backwards compatibility)
+ */
+export async function sendPhotoMessageImmediate(
+  appId: string,
+  fromUser: string, 
+  toUser: string,
+  imageUrl: string 
+): Promise<boolean> {
+  return sendPhotoMessage(appId, fromUser, toUser, imageUrl, 0);
 }

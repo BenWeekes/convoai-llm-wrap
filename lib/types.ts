@@ -1,10 +1,7 @@
 // File: lib/types.ts
-// Contains all shared type definitions
+// Contains all shared type definitions - simplified without source property
 
 import type OpenAI from 'openai';
-
-
-
 
 export type ToolResponseCacheItem = {
   toolCallId: string;
@@ -28,6 +25,27 @@ export type RTMSessionParams = {
   agent_rtm_channel?: string;
 };
 
+// Simplified Message interface - no source property
+export interface Message {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  name?: string;
+  tool_calls?: any[];
+  tool_call_id?: string;
+  mode?: 'chat' | 'voice' | 'video'; // chat = RTM, voice/video = endpoints
+  timestamp?: number;
+}
+
+// Simplified Conversation interface
+export interface Conversation {
+  appId: string;
+  userId: string;
+  messages: Message[];
+  lastUpdated: number;
+  rtmSystemMessage?: string;
+  lastSystemMessageHash?: string;
+}
+
 export interface EndpointConfig {
   ragData: Record<string, string>;
   tools: OpenAI.ChatCompletionTool[];
@@ -38,6 +56,7 @@ export interface EndpointConfig {
     endpointMode?: 'voice' | 'video'; // What mode for API calls
   };
 }
+
 export type EndpointRequest = {
   messages: any[];
   model?: string;

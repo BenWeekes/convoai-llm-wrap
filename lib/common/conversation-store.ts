@@ -1,6 +1,6 @@
 // lib/common/conversation-store.ts
-// Enhanced with communication mode support while preserving existing functionality
-// Added configurable debug logging for conversation context
+// Enhanced with smart memory management and mode-based tracking
+// chat = RTM, voice/video = endpoints
 
 import { CONFIG } from './cache';
 
@@ -11,8 +11,8 @@ export interface Message {
   name?: string;
   tool_calls?: any[];
   tool_call_id?: string;
-  mode?: 'chat' | 'voice' | 'video'; // NEW: Add mode support
-  timestamp?: number; // NEW: Add timestamp support
+  mode?: 'chat' | 'voice' | 'video'; // chat = RTM, voice/video = endpoints
+  timestamp?: number;
 }
 
 export interface Conversation {
@@ -20,15 +20,139 @@ export interface Conversation {
   userId: string;
   messages: Message[];
   lastUpdated: number;
+  rtmSystemMessage?: string; // Store original RTM system message
+  lastSystemMessageHash?: string; // Track system message changes
 }
 
-// Configuration
+// Configuration for memory management
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const MAX_CONVERSATION_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-const MAX_MESSAGES_PER_CONVERSATION = 100; // Prevent memory issues
+
+// Tiered message limits based on conversation activity
+const MESSAGE_LIMITS = {
+  MAX_TOTAL_MESSAGES: 150,        // Hard limit - force aggressive cleanup
+  TARGET_MESSAGES: 100,           // Target after cleanup
+  CHAT_WINDOW_SIZE: 50,          // Keep last N chat (RTM) messages
+  VOICE_VIDEO_WINDOW_SIZE: 30,   // Keep last N voice/video (endpoint) messages
+  MIN_MESSAGES_TO_KEEP: 20       // Never go below this
+};
 
 // In-memory store
 const conversationStore: Record<string, Conversation> = {};
+
+/**
+ * Creates a simple hash of a string for comparison
+ */
+function simpleHash(str: string): string {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return hash.toString();
+}
+
+/**
+ * Smart conversation trimming that preserves important messages
+ */
+function smartTrimConversation(conversation: Conversation): void {
+  const messages = conversation.messages;
+  
+  if (messages.length <= MESSAGE_LIMITS.TARGET_MESSAGES) {
+    return; // No trimming needed
+  }
+  
+  console.log(`[CONVERSATION] Trimming conversation for ${conversation.userId} (${messages.length} → target: ${MESSAGE_LIMITS.TARGET_MESSAGES})`);
+  
+  // Separate messages by type and importance
+  const systemMessages = messages.filter(msg => msg.role === 'system');
+  const chatMessages = messages
+    .filter(msg => msg.mode === 'chat' && msg.role !== 'system') // RTM messages
+    .slice(-MESSAGE_LIMITS.CHAT_WINDOW_SIZE);
+  const voiceVideoMessages = messages
+    .filter(msg => (msg.mode === 'voice' || msg.mode === 'video') && msg.role !== 'system') // Endpoint messages
+    .slice(-MESSAGE_LIMITS.VOICE_VIDEO_WINDOW_SIZE);
+  const toolMessages = messages.filter(msg => msg.role === 'tool');
+  
+  // Rebuild conversation with smart selection
+  let keptMessages: Message[] = [];
+  
+  // 1. Always keep the most recent system message
+  if (systemMessages.length > 0) {
+    keptMessages.push(systemMessages[systemMessages.length - 1]);
+  }
+  
+  // 2. Merge and sort recent messages by timestamp
+  const recentMessages = [...chatMessages, ...voiceVideoMessages]
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  
+  // 3. Keep recent tool messages that correspond to recent assistant messages
+  const recentMessageIds = new Set(
+    recentMessages
+      .filter(msg => msg.role === 'assistant' && msg.tool_calls)
+      .flatMap(msg => msg.tool_calls?.map(tc => tc.id) || [])
+  );
+  
+  const relevantToolMessages = toolMessages.filter(msg => 
+    msg.tool_call_id && recentMessageIds.has(msg.tool_call_id)
+  );
+  
+  // 4. Combine all kept messages and sort by timestamp
+  keptMessages = [...keptMessages, ...recentMessages, ...relevantToolMessages]
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  
+  // 5. Ensure we don't go below minimum
+  if (keptMessages.length < MESSAGE_LIMITS.MIN_MESSAGES_TO_KEEP && messages.length > MESSAGE_LIMITS.MIN_MESSAGES_TO_KEEP) {
+    const additionalNeeded = MESSAGE_LIMITS.MIN_MESSAGES_TO_KEEP - keptMessages.length;
+    const additionalMessages = messages
+      .filter(msg => !keptMessages.includes(msg))
+      .slice(-additionalNeeded);
+    keptMessages = [...keptMessages, ...additionalMessages]
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+  }
+  
+  // Update conversation
+  conversation.messages = keptMessages;
+  
+  console.log(`[CONVERSATION] Trimmed to ${keptMessages.length} messages`);
+  console.log(`[CONVERSATION] Kept: ${systemMessages.length > 0 ? 1 : 0} system, ${chatMessages.length} chat, ${voiceVideoMessages.length} voice/video, ${relevantToolMessages.length} tool`);
+}
+
+/**
+ * Smart system message management based on mode
+ */
+function manageSystemMessage(conversation: Conversation, newSystemContent: string, messageMode: 'chat' | 'voice' | 'video' | undefined): void {
+  const newSystemHash = simpleHash(newSystemContent);
+  
+  // Store original RTM system message if this is the first chat message
+  if (messageMode === 'chat' && !conversation.rtmSystemMessage) {
+    conversation.rtmSystemMessage = newSystemContent;
+    conversation.lastSystemMessageHash = newSystemHash;
+    console.log(`[CONVERSATION] Stored original RTM system message for ${conversation.userId}`);
+  }
+  
+  // Check if system message actually changed
+  if (conversation.lastSystemMessageHash === newSystemHash) {
+    console.log(`[CONVERSATION] System message unchanged for ${conversation.userId}, skipping duplicate`);
+    return;
+  }
+  
+  // Remove old system messages
+  conversation.messages = conversation.messages.filter(msg => msg.role !== 'system');
+  
+  // Add new system message
+  conversation.messages.unshift({
+    role: 'system',
+    content: newSystemContent,
+    timestamp: Date.now(),
+    mode: messageMode
+  });
+  
+  conversation.lastSystemMessageHash = newSystemHash;
+  const modeType = messageMode === 'chat' ? 'RTM' : 'Endpoint';
+  console.log(`[CONVERSATION] Updated system message for ${conversation.userId} (${modeType}: ${messageMode})`);
+}
 
 /**
  * Gets a unique key for the conversation based on appId and userId
@@ -38,7 +162,7 @@ function getConversationKey(appId: string, userId: string): string {
 }
 
 /**
- * Logs conversation context with mode analysis
+ * Logs conversation context with mode analysis and memory usage
  */
 export function logConversationContext(
   appId: string, 
@@ -56,63 +180,54 @@ export function logConversationContext(
   console.log(`- Total Messages: ${conversation.messages.length}`);
   console.log(`- Last Updated: ${new Date(conversation.lastUpdated).toISOString()}`);
   
-  // Analyze mode distribution in conversation
-  const modeStats = {
-    chat: 0,
-    video: 0,
-    voice: 0,
+  // Memory usage analysis
+  const memoryEstimate = JSON.stringify(conversation).length;
+  console.log(`- Memory Estimate: ${(memoryEstimate / 1024).toFixed(2)} KB`);
+  
+  if (conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES) {
+    console.log(`- ⚠️  HIGH MESSAGE COUNT: ${conversation.messages.length}/${MESSAGE_LIMITS.MAX_TOTAL_MESSAGES} (trimming needed)`);
+  }
+  
+  // Analyze message distribution by mode
+  const messageStats = {
+    system: 0,
+    chat: 0,      // RTM messages
+    voice: 0,     // Voice endpoint messages
+    video: 0,     // Video endpoint messages
+    tool: 0,
     unspecified: 0
   };
   
-  let lastUserMode = 'unknown';
-  let lastAssistantMode = 'unknown';
-  
-  conversation.messages.forEach((msg, index) => {
-    if (msg.mode === 'chat') modeStats.chat++;
-    else if (msg.mode === 'video') modeStats.video++;
-    else if (msg.mode === 'voice') modeStats.voice++;
-    else modeStats.unspecified++;
-    
-    // Track last modes by role
-    if (msg.role === 'user' && msg.mode) {
-      lastUserMode = msg.mode;
-    } else if (msg.role === 'assistant' && msg.mode) {
-      lastAssistantMode = msg.mode;
-    }
+  conversation.messages.forEach(msg => {
+    if (msg.role === 'system') messageStats.system++;
+    else if (msg.role === 'tool') messageStats.tool++;
+    else if (msg.mode === 'chat') messageStats.chat++;
+    else if (msg.mode === 'voice') messageStats.voice++;
+    else if (msg.mode === 'video') messageStats.video++;
+    else messageStats.unspecified++;
   });
   
-  console.log(`💬 MODE DISTRIBUTION:`);
-  console.log(`  - Chat: ${modeStats.chat} messages`);
-  console.log(`  - Video: ${modeStats.video} messages`);
-  console.log(`  - Voice: ${modeStats.voice} messages`);
-  console.log(`  - Unspecified: ${modeStats.unspecified} messages`);
-  console.log(`💬 LAST MODES:`);
-  console.log(`  - Last User Mode: ${lastUserMode}`);
-  console.log(`  - Last Assistant Mode: ${lastAssistantMode}`);
+  console.log(`💬 MESSAGE DISTRIBUTION:`);
+  console.log(`  - System: ${messageStats.system}`);
+  console.log(`  - Chat (RTM): ${messageStats.chat}`);
+  console.log(`  - Video (Endpoint): ${messageStats.video}`);
+  console.log(`  - Voice (Endpoint): ${messageStats.voice}`);
+  console.log(`  - Tool: ${messageStats.tool}`);
+  console.log(`  - Unspecified: ${messageStats.unspecified}`);
   
-  // Show recent message sequence with modes
+  // Show recent message sequence
   if (conversation.messages.length > 0) {
-    console.log(`💬 RECENT MESSAGES (last 5):`);
-    const recentMessages = conversation.messages.slice(-5);
+    console.log(`💬 RECENT MESSAGES (last 3):`);
+    const recentMessages = conversation.messages.slice(-3);
     recentMessages.forEach((msg, index) => {
-      const actualIndex = conversation.messages.length - 5 + index;
-      const modeInfo = msg.mode ? ` [${msg.mode}]` : ' [no mode]';
+      const actualIndex = conversation.messages.length - 3 + index;
+      const modeInfo = msg.mode ? ` [${msg.mode}]` : '';
+      const serviceInfo = msg.mode === 'chat' ? ' (RTM)' : msg.mode ? ' (Endpoint)' : '';
       const preview = msg.content ? 
         (msg.content.length > 50 ? msg.content.substring(0, 50) + '...' : msg.content) : 
         '[no content]';
-      console.log(`  [${actualIndex}] ${msg.role}${modeInfo}: ${preview}`);
+      console.log(`  [${actualIndex}] ${msg.role}${modeInfo}${serviceInfo}: ${preview}`);
     });
-  }
-  
-  // Detect potential mode transitions
-  const transition = detectModeTransition(conversation);
-  if (transition.hasModeTransition) {
-    console.log(`💬 🚨 MODE TRANSITION DETECTED:`);
-    console.log(`  - Last User Mode: ${transition.lastUserMode}`);
-    console.log(`  - Last Assistant Mode: ${transition.lastAssistantMode}`);
-    if (transition.possibleHangup) {
-      console.log(`  - 🔥 POSSIBLE HANGUP: Video/Voice → Chat transition detected!`);
-    }
   }
   
   console.log(separator);
@@ -150,7 +265,7 @@ export function detectModeTransition(conversation: Conversation): {
   // Check for mode transitions
   const hasModeTransition = lastUserMode !== lastAssistantMode;
   
-  // Check for possible hangup (video/voice to chat transition)
+  // Check for possible hangup (voice/video to chat transition)
   const possibleHangup = (lastAssistantMode === 'video' || lastAssistantMode === 'voice') && 
                          lastUserMode === 'chat';
   
@@ -170,7 +285,6 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
   
   if (!conversationStore[key]) {
     console.log(`[CONVERSATION] Creating new conversation for ${userId} in app ${appId}`);
-    // Create a new conversation
     conversationStore[key] = {
       appId,
       userId,
@@ -178,12 +292,9 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
       lastUpdated: Date.now()
     };
     
-    // LOG NEW CONVERSATION CREATION
     logConversationContext(appId, userId, conversationStore[key], 'created');
   } else {
     console.log(`[CONVERSATION] Found existing conversation for ${userId} with ${conversationStore[key].messages.length} messages`);
-    
-    // LOG CONVERSATION RETRIEVAL
     logConversationContext(appId, userId, conversationStore[key], 'retrieved');
   }
   
@@ -191,105 +302,134 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
 }
 
 /**
- * Saves a message to the conversation - Enhanced with mode support
+ * Simplified saveMessage with mode-based memory management
  */
-export async function saveMessage(appId: string, userId: string, message: Message | {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  mode?: 'chat' | 'voice' | 'video';
-  timestamp?: number;
-}): Promise<void> {
+export async function saveMessage(
+  appId: string, 
+  userId: string, 
+  message: Message
+): Promise<void> {
   const conversation = await getOrCreateConversation(appId, userId);
   
-  // Trim conversation if it's getting too long
-  if (conversation.messages.length >= MAX_MESSAGES_PER_CONVERSATION) {
-    console.log(`[CONVERSATION] Trimming conversation for ${userId} (exceeded ${MAX_MESSAGES_PER_CONVERSATION} messages)`);
+  // Handle system messages specially
+  if (message.role === 'system') {
+    manageSystemMessage(conversation, message.content, message.mode);
+    conversation.lastUpdated = Date.now();
     
-    // Keep system messages and the most recent messages
-    const systemMessages = conversation.messages.filter(msg => msg.role === 'system');
-    const nonSystemMessages = conversation.messages.filter(msg => msg.role !== 'system');
-    
-    // Keep the most recent messages
-    const recentMessages = nonSystemMessages.slice(-Math.floor(MAX_MESSAGES_PER_CONVERSATION / 2));
-    
-    // Rebuild conversation with system messages and recent messages
-    conversation.messages = [...systemMessages, ...recentMessages];
+    logConversationContext(appId, userId, conversation, 'updated');
+    return;
   }
   
-  // Enhanced message with timestamp and mode support
+  // Enhanced message with metadata
   const enhancedMessage: Message = {
     ...message,
     timestamp: message.timestamp || Date.now()
   };
   
-  // Only add mode if specified
-  if ('mode' in message && message.mode) {
-    enhancedMessage.mode = message.mode;
-  }
-  
   // Add the new message
   conversation.messages.push(enhancedMessage);
   conversation.lastUpdated = Date.now();
   
-  const modeInfo = enhancedMessage.mode ? ` (${enhancedMessage.mode} mode)` : '';
-  console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo} for ${userId}. Conversation now has ${conversation.messages.length} messages`);
+  // Smart trimming if conversation is getting too large
+  if (conversation.messages.length > MESSAGE_LIMITS.MAX_TOTAL_MESSAGES) {
+    smartTrimConversation(conversation);
+  }
   
-  // LOG CONVERSATION UPDATE WITH MODE CONTEXT
+  const modeInfo = enhancedMessage.mode ? ` [${enhancedMessage.mode}]` : '';
+  const serviceInfo = enhancedMessage.mode === 'chat' ? ' (RTM)' : enhancedMessage.mode ? ' (Endpoint)' : '';
+  console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo}${serviceInfo} for ${userId}. Conversation now has ${conversation.messages.length} messages`);
+  
   logConversationContext(appId, userId, conversation, 'updated');
 }
 
 /**
- * Cleans up old conversations to prevent memory leaks
+ * Enhanced cleanup with memory pressure detection
  */
 export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_MS): void {
   const now = Date.now();
   let removedCount = 0;
+  let trimmedCount = 0;
   
+  // Calculate total memory usage
+  let totalMemoryEstimate = 0;
+  const conversationSizes: Array<{key: string, size: number, age: number}> = [];
+  
+  Object.entries(conversationStore).forEach(([key, conversation]) => {
+    const size = JSON.stringify(conversation).length;
+    const age = now - conversation.lastUpdated;
+    totalMemoryEstimate += size;
+    conversationSizes.push({ key, size, age });
+  });
+  
+  console.log(`[CONVERSATION] Memory usage: ${(totalMemoryEstimate / 1024 / 1024).toFixed(2)} MB across ${Object.keys(conversationStore).length} conversations`);
+  
+  // Remove old conversations
   Object.keys(conversationStore).forEach(key => {
     const conversation = conversationStore[key];
-    if (now - conversation.lastUpdated > maxAgeMs) {
+    const age = now - conversation.lastUpdated;
+    
+    if (age > maxAgeMs) {
       delete conversationStore[key];
       removedCount++;
+    } else if (conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES) {
+      // Trim large conversations even if they're not old
+      smartTrimConversation(conversation);
+      trimmedCount++;
     }
   });
   
-  if (removedCount > 0) {
-    console.log(`[CONVERSATION] Cleaned up ${removedCount} old conversations`);
+  // Memory pressure cleanup - remove largest conversations if we're using too much memory
+  const MAX_TOTAL_MEMORY_MB = 50; // 50MB limit
+  if (totalMemoryEstimate > MAX_TOTAL_MEMORY_MB * 1024 * 1024) {
+    console.log(`[CONVERSATION] Memory pressure detected (${(totalMemoryEstimate / 1024 / 1024).toFixed(2)} MB), removing largest conversations`);
+    
+    // Sort by size descending
+    conversationSizes.sort((a, b) => b.size - a.size);
+    
+    let memoryFreed = 0;
+    const targetToFree = totalMemoryEstimate - (MAX_TOTAL_MEMORY_MB * 0.8 * 1024 * 1024); // Free to 80% of limit
+    
+    for (const { key, size } of conversationSizes) {
+      if (memoryFreed >= targetToFree) break;
+      
+      console.log(`[CONVERSATION] Removing large conversation ${key} (${(size / 1024).toFixed(2)} KB)`);
+      delete conversationStore[key];
+      memoryFreed += size;
+      removedCount++;
+    }
+  }
+  
+  if (removedCount > 0 || trimmedCount > 0) {
+    console.log(`[CONVERSATION] Cleanup complete: ${removedCount} removed, ${trimmedCount} trimmed`);
   }
 }
 
 /**
- * Gets all conversations (for debugging)
- */
-export function getAllConversations(): Record<string, Conversation> {
-  return { ...conversationStore };
-}
-
-/**
- * Gets conversation statistics - Enhanced with mode information
+ * Gets conversation statistics with memory analysis
  */
 export function getConversationStats(): any {
   const totalConversations = Object.keys(conversationStore).length;
   let totalMessages = 0;
+  let totalMemoryEstimate = 0;
   let oldestConversationAge = 0;
   const now = Date.now();
   
-  // Track mode statistics
   const modeStats = {
-    chat: 0,
-    voice: 0,
-    video: 0,
+    chat: 0,      // RTM messages
+    voice: 0,     // Voice endpoint messages
+    video: 0,     // Video endpoint messages
     unspecified: 0
   };
   
   Object.values(conversationStore).forEach(convo => {
     totalMessages += convo.messages.length;
+    totalMemoryEstimate += JSON.stringify(convo).length;
+    
     const age = now - convo.lastUpdated;
     if (age > oldestConversationAge) {
       oldestConversationAge = age;
     }
     
-    // Count messages by mode
     convo.messages.forEach(msg => {
       if (msg.mode === 'chat') modeStats.chat++;
       else if (msg.mode === 'voice') modeStats.voice++;
@@ -301,9 +441,11 @@ export function getConversationStats(): any {
   return {
     totalConversations,
     totalMessages,
+    memoryUsageMB: (totalMemoryEstimate / 1024 / 1024).toFixed(2),
     oldestConversationAgeHours: oldestConversationAge / (60 * 60 * 1000),
     averageMessagesPerConversation: totalConversations ? totalMessages / totalConversations : 0,
-    messagesByMode: modeStats
+    messagesByMode: modeStats,
+    memoryLimits: MESSAGE_LIMITS
   };
 }
 
@@ -317,8 +459,8 @@ export async function clearAllConversations(): Promise<void> {
   console.log('[CONVERSATION] Cleared all conversations');
 }
 
-// Set up cleanup interval for old conversations
-if (typeof window === 'undefined') { // Only run on server
+// Enhanced cleanup interval
+if (typeof window === 'undefined') {
   setInterval(() => {
     try {
       cleanupOldConversations();
@@ -327,6 +469,9 @@ if (typeof window === 'undefined') { // Only run on server
     }
   }, CLEANUP_INTERVAL_MS);
   
-  console.log('[CONVERSATION] Conversation store initialized with mode support, cleanup scheduled every', 
-    CLEANUP_INTERVAL_MS / (60 * 1000), 'minutes');
+  console.log('[CONVERSATION] Simplified conversation store initialized with mode-based memory management');
+  console.log(`[CONVERSATION] Limits: ${MESSAGE_LIMITS.MAX_TOTAL_MESSAGES} max messages, ${MESSAGE_LIMITS.TARGET_MESSAGES} target, cleanup every ${CLEANUP_INTERVAL_MS / (60 * 1000)} minutes`);
 }
+
+// Export memory management functions for manual control
+export { smartTrimConversation, MESSAGE_LIMITS };

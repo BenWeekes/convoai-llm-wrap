@@ -1,5 +1,6 @@
 // lib/services/rtm-service.ts
-// Enhanced with mode context like the video endpoint
+// Enhanced with mode context and typing indicators
+// RTM always uses mode: 'chat'
 
 import AgoraRTM from 'rtm-nodejs';
 import { getOrCreateConversation, saveMessage, detectModeTransition } from '../common/conversation-store';
@@ -62,6 +63,9 @@ class RTMService {
       await this.rtmClient.login(options);
       console.log(`[RTM] Successfully logged in as ${userId}`);
       
+      // Initialize system message for RTM (only once per user)
+      await this.initializeRTMSystemMessage(appId, userId);
+      
       this.initialized = true;
       return true;
     } catch (error) {
@@ -70,11 +74,71 @@ class RTMService {
     }
   }
   
+  /**
+   * Initialize the RTM system message (called once when RTM starts)
+   */
+  private async initializeRTMSystemMessage(appId: string, userId: string): Promise<void> {
+    try {
+      // Create the initial RTM system message
+      let rtmSystemContent = process.env.RTM_LLM_PROMPT || 
+        exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData);
+      
+      // Add RTM-specific mode context
+      rtmSystemContent += `
+
+CURRENT COMMUNICATION MODE: CHAT (user is texting you via RTM - they can only see text)
+AVAILABLE MODES: chat, video`;
+      
+      console.log(`[RTM] Initializing system message for ${userId}`);
+      
+      // Save the system message with chat mode (RTM = chat)
+      await saveMessage(appId, userId, {
+        role: 'system',
+        content: rtmSystemContent,
+        mode: 'chat'
+      });
+      
+      console.log(`[RTM] RTM system message initialized for ${userId}`);
+    } catch (error) {
+      console.error(`[RTM] Failed to initialize system message for ${userId}:`, error);
+    }
+  }
+  
+  /**
+   * Send typing indicator to user
+   */
+  private async sendTypingIndicator(userId: string): Promise<void> {
+    try {
+      console.log(`[RTM] 📝 Sending typing indicator to ${userId}`);
+      
+      const typingPayload = {
+        type: "typing",
+        status: "typing"
+      };
+      
+      const options = {
+        customType: "user.typing",
+        channelType: "USER",
+      };
+      
+      await this.rtmClient.publish(userId, JSON.stringify(typingPayload), options);
+      console.log(`[RTM] ✅ Typing indicator sent to ${userId}`);
+    } catch (error) {
+      console.error(`[RTM] ❌ Failed to send typing indicator to ${userId}:`, error);
+    }
+  }
+  
   private setupEventHandlers() {
     this.rtmClient.addEventListener("message", async (event: any) => {
       console.log(`[RTM] RAW MESSAGE from ${event.publisher}:`, event.message);
       
       try {
+        const userId = event.publisher;
+        const appId = process.env.RTM_APP_ID || '';
+        
+        // IMMEDIATELY SEND TYPING INDICATOR (before any processing)
+        await this.sendTypingIndicator(userId);
+        
         // Parse message
         let messageContent = event.message;
         if (typeof event.message === 'string') {
@@ -91,7 +155,7 @@ class RTMService {
         // LOG RTM MESSAGE PROCESSING
         logRTMMessageProcessing({
           userId: event.publisher,
-          appId: process.env.RTM_APP_ID || '',
+          appId,
           messageContent,
           channel: this.channelName,
           timestamp: Date.now()
@@ -100,7 +164,7 @@ class RTMService {
         // LOG MODE TRANSITION (RTM chat is always 'chat' mode)
         logModeTransition({
           userId: event.publisher,
-          appId: process.env.RTM_APP_ID || '',
+          appId,
           fromMode: 'unknown',
           toMode: 'chat',
           channel: this.channelName,
@@ -108,8 +172,6 @@ class RTMService {
         });
         
         console.log(`[RTM] PROCESSED MESSAGE from ${event.publisher}:`, messageContent);
-        const userId = event.publisher;
-        const appId = process.env.RTM_APP_ID || '';
         const model = process.env.RTM_LLM_MODEL || 'gpt-4o-mini';
         const baseURL = process.env.RTM_LLM_BASE_URL || 'https://api.openai.com/v1';
         
@@ -120,11 +182,11 @@ class RTMService {
         const modeTransition = detectModeTransition(conversation);
         console.log(`[RTM] Mode transition analysis:`, modeTransition);
         
-        // Add user message with CHAT mode
+        // Add user message with CHAT mode (RTM = chat)
         await saveMessage(appId, userId, {
           role: 'user',
           content: messageContent,
-          mode: 'chat' // RTM messages are always chat mode
+          mode: 'chat'
         });
         
         console.log(`[RTM] SAVED USER MESSAGE with mode: chat`);
@@ -135,49 +197,9 @@ class RTMService {
           baseURL
         });
         
-        // Prepare messages - get updated conversation after saving user message
+        // Get updated conversation - system message is already managed by conversation store
         const updatedConversation = await getOrCreateConversation(appId, userId);
-        let messages = updatedConversation.messages;
-        
-        // Create system message with mode context (like video endpoint does)
-        let systemContent = process.env.RTM_LLM_PROMPT || 
-          exampleEndpointConfig.systemMessageTemplate(exampleEndpointConfig.ragData);
-        
-        // ADD CURRENT MODE CONTEXT (like endpoint-factory.ts does)
-        let currentModeContext = `
-
-CURRENT COMMUNICATION MODE: CHAT (user is texting you via RTM - they can only see text)
-AVAILABLE MODES: chat, video`;
-
-        // ENHANCE context if user just came from video call
-        if (modeTransition.possibleHangup) {
-          console.log(`[RTM] 🔥 HANGUP DETECTED - User switched from ${modeTransition.lastAssistantMode} to chat`);
-          currentModeContext += `
-
-IMPORTANT: User was just on ${modeTransition.lastAssistantMode?.toUpperCase()} call with you but has now switched back to chat. Acknowledge this transition naturally.`;
-        }
-        
-        // Add mode context to system message
-        systemContent += currentModeContext;
-        
-        // Add system message if not present, or ensure it has mode context
-        if (!messages.some(msg => msg.role === 'system')) {
-          messages = [
-            {
-              role: 'system',
-              content: systemContent,
-              mode: 'chat'
-            },
-            ...messages
-          ];
-        } else {
-          // Update existing system message with current mode context
-          messages = messages.map(msg => 
-            msg.role === 'system' 
-              ? { ...msg, content: systemContent, mode: 'chat' }
-              : msg
-          );
-        }
+        const messages = updatedConversation.messages; // Use existing messages with managed system message
         
         // Create request parameters
         const requestParams = {
@@ -187,13 +209,13 @@ IMPORTANT: User was just on ${modeTransition.lastAssistantMode?.toUpperCase()} c
           tool_choice: 'auto'
         };
         
-        // LOG THE RTM LLM REQUEST (now with mode context)
-        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT WITH MODE CONTEXT`);
+        // LOG THE RTM LLM REQUEST
+        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT`);
         logLLMRequest(requestParams, {
           userId,
           appId,
           channel: this.channelName,
-          endpointMode: 'chat', // RTM is always chat mode
+          endpointMode: 'chat',
           conversationLength: updatedConversation.messages.length
         });
         
@@ -209,12 +231,42 @@ IMPORTANT: User was just on ${modeTransition.lastAssistantMode?.toUpperCase()} c
           requestType: 'non-streaming'
         });
         
-        // Handle response and tool calls (simplified)
-        let finalResponse = response.choices[0].message.content || '';
+        // Handle response and tool calls
+        const choice = response.choices[0];
+        let finalResponse = choice.message.content || '';
+        
+        // Handle tool calls if present
+        if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
+          console.log(`[RTM] 🔧 Processing ${choice.message.tool_calls.length} tool calls`);
+          
+          for (const toolCall of choice.message.tool_calls) {
+            const toolName = toolCall.function.name;
+            const toolArgs = JSON.parse(toolCall.function.arguments || '{}');
+            
+            console.log(`[RTM] 🔧 Executing tool: ${toolName}`, toolArgs);
+            
+            // Handle all tools using the proper endpoint toolMap
+            if (exampleEndpointConfig.toolMap[toolName]) {
+              try {
+                const toolResult = await exampleEndpointConfig.toolMap[toolName](appId, userId, this.channelName, toolArgs);
+                console.log(`[RTM] 🔧 Tool ${toolName} result:`, toolResult);
+                
+                // Add tool result to response
+                finalResponse += `\n\n${toolResult}`;
+              } catch (toolError) {
+                console.error(`[RTM] ❌ Tool ${toolName} error:`, toolError);
+                finalResponse += `\n\nSorry, there was an issue with ${toolName}.`;
+              }
+            } else {
+              console.error(`[RTM] ❌ Unknown tool: ${toolName}`);
+              finalResponse += `\n\nSorry, I don't recognize the ${toolName} tool.`;
+            }
+          }
+        }
         
         console.log(`[RTM] 🤖 LLM RESPONSE for RTM CHAT:`, finalResponse);
 
-        // Save assistant response with CHAT mode
+        // Save assistant response with CHAT mode (RTM = chat)
         console.log(`[RTM] 💾 SAVING ASSISTANT RESPONSE WITH MODE: chat`);
         console.log(`[RTM] Response content length: ${finalResponse.length} chars`);
         console.log(`[RTM] Response preview: ${finalResponse.substring(0, 100)}${finalResponse.length > 100 ? '...' : ''}`);
@@ -222,7 +274,7 @@ IMPORTANT: User was just on ${modeTransition.lastAssistantMode?.toUpperCase()} c
         await saveMessage(appId, userId, {
           role: 'assistant',
           content: finalResponse,
-          mode: 'chat' // RTM responses are always chat mode
+          mode: 'chat'
         });
         
         console.log(`[RTM] SAVED ASSISTANT RESPONSE with mode: chat`);
@@ -248,6 +300,16 @@ IMPORTANT: User was just on ${modeTransition.lastAssistantMode?.toUpperCase()} c
         
       } catch (error) {
         console.error('[RTM] ❌ ERROR PROCESSING MESSAGE:', error);
+        
+        // Try to send error response to user
+        try {
+          await this.rtmClient.publish(event.publisher, "Sorry, I encountered an error processing your message.", {
+            customType: "user.transcription",
+            channelType: "USER",
+          });
+        } catch (sendError) {
+          console.error('[RTM] ❌ Failed to send error response:', sendError);
+        }
       }
     });
     
