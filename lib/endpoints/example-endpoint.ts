@@ -1,7 +1,5 @@
 // File: lib/endpoints/example-endpoint.ts
-// Configuration for the combined example endpoint with sandwich and photo tools
-// Now includes RTM chat integration through the shared chat handler
-// Updated with communication mode support and randomized photos
+// Fixed to handle null/empty args in send_photo function
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -67,18 +65,15 @@ const EXAMPLE_TOOLS: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "send_photo",
       description: "Request a photo be sent to the user.",
-      
       parameters: {
-        /*
         type: "object",
         properties: {
           subject: {
             type: "string",
-            description: "Type of photo subject (e.g. 'face', 'full_body', 'landscape')"
+            description: "Type of photo subject (optional, e.g. 'face', 'full_body', 'landscape')"
           }
         },
-        required: ["subject"]
-        */
+        required: []
       }
     }
   }
@@ -96,7 +91,7 @@ const PHOTO_OPTIONS = [
 
 // Implement the tool functions with enhanced logging
 function order_sandwich(appId: string, userId: string, channel: string, args: any): string {
-  const filling = args.filling || "Unknown";
+  const filling = args?.filling || "Unknown";
   
   console.log(`🥪 SANDWICH TOOL CALLED:`, { appId, userId, channel, filling });
   console.log(`🥪 Placing sandwich order for ${userId} in ${channel} with filling: ${filling}`);
@@ -108,16 +103,17 @@ function order_sandwich(appId: string, userId: string, channel: string, args: an
 }
 
 async function send_photo(appId: string, userId: string, channel: string, args: any): Promise<string> {
-  const subject = args.subject || "default";
+  // Handle null/empty args safely
+  const subject = args?.subject || "default";
 
-  console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject });
+  console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject, argsReceived: args });
   console.log(`📸 Sending ${subject} photo to ${userId} in ${channel}`);
   
   // Check environment variables - for RTM chat, use the RTM-specific from user
   let fromUser = process.env.RTM_FROM_USER;
   
   if (!fromUser) {
-    console.error('📸 ERROR: RTM_FROM_USER or EXAMPLE_RTM_FROM_USER environment variable is not set');
+    console.error('📸 ERROR: RTM_FROM_USER environment variable is not set');
     return `Failed to send photo: Missing RTM_FROM_USER configuration.`;
   }
   
@@ -178,7 +174,7 @@ const EXAMPLE_TOOL_MAP = {
     }
   },
   send_photo: async (appId: string, userId: string, channel: string, args: any) => {
-    console.log(`🔧 TOOL MAP: send_photo wrapper called for channel: ${channel}`);
+    console.log(`🔧 TOOL MAP: send_photo wrapper called for channel: ${channel}, args:`, args);
     try {
       const result = await send_photo(appId, userId, channel, args);
       console.log(`🔧 TOOL MAP: send_photo wrapper completed successfully`);

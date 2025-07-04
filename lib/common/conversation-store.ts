@@ -1,17 +1,16 @@
 // lib/common/conversation-store.ts
-// Enhanced with smart memory management and mode-based tracking
-// chat = RTM, voice/video = endpoints
+// Updated to store mode internally but not send to LLM
 
 import { CONFIG } from './cache';
 
-// Define the interfaces
+// Define the interfaces - keep mode for internal tracking
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   name?: string;
   tool_calls?: any[];
   tool_call_id?: string;
-  mode?: 'chat' | 'voice' | 'video'; // chat = RTM, voice/video = endpoints
+  mode?: 'chat' | 'voice' | 'video'; // INTERNAL ONLY - not sent to LLM
   timestamp?: number;
 }
 
@@ -20,8 +19,8 @@ export interface Conversation {
   userId: string;
   messages: Message[];
   lastUpdated: number;
-  rtmSystemMessage?: string; // Store original RTM system message
-  lastSystemMessageHash?: string; // Track system message changes
+  rtmSystemMessage?: string;
+  lastSystemMessageHash?: string;
 }
 
 // Configuration for memory management
@@ -30,11 +29,11 @@ const MAX_CONVERSATION_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Tiered message limits based on conversation activity
 const MESSAGE_LIMITS = {
-  MAX_TOTAL_MESSAGES: 150,        // Hard limit - force aggressive cleanup
-  TARGET_MESSAGES: 100,           // Target after cleanup
-  CHAT_WINDOW_SIZE: 50,          // Keep last N chat (RTM) messages
-  VOICE_VIDEO_WINDOW_SIZE: 30,   // Keep last N voice/video (endpoint) messages
-  MIN_MESSAGES_TO_KEEP: 20       // Never go below this
+  MAX_TOTAL_MESSAGES: 150,
+  TARGET_MESSAGES: 100,
+  CHAT_WINDOW_SIZE: 50,
+  VOICE_VIDEO_WINDOW_SIZE: 30,
+  MIN_MESSAGES_TO_KEEP: 20
 };
 
 // In-memory store
@@ -48,7 +47,7 @@ function simpleHash(str: string): string {
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
     hash = ((hash << 5) - hash) + char;
-    hash = hash & hash; // Convert to 32bit integer
+    hash = hash & hash;
   }
   return hash.toString();
 }
@@ -60,7 +59,7 @@ function smartTrimConversation(conversation: Conversation): void {
   const messages = conversation.messages;
   
   if (messages.length <= MESSAGE_LIMITS.TARGET_MESSAGES) {
-    return; // No trimming needed
+    return;
   }
   
   console.log(`[CONVERSATION] Trimming conversation for ${conversation.userId} (${messages.length} → target: ${MESSAGE_LIMITS.TARGET_MESSAGES})`);
@@ -68,26 +67,26 @@ function smartTrimConversation(conversation: Conversation): void {
   // Separate messages by type and importance
   const systemMessages = messages.filter(msg => msg.role === 'system');
   const chatMessages = messages
-    .filter(msg => msg.mode === 'chat' && msg.role !== 'system') // RTM messages
+    .filter(msg => msg.mode === 'chat' && msg.role !== 'system')
     .slice(-MESSAGE_LIMITS.CHAT_WINDOW_SIZE);
   const voiceVideoMessages = messages
-    .filter(msg => (msg.mode === 'voice' || msg.mode === 'video') && msg.role !== 'system') // Endpoint messages
+    .filter(msg => (msg.mode === 'voice' || msg.mode === 'video') && msg.role !== 'system')
     .slice(-MESSAGE_LIMITS.VOICE_VIDEO_WINDOW_SIZE);
   const toolMessages = messages.filter(msg => msg.role === 'tool');
   
   // Rebuild conversation with smart selection
   let keptMessages: Message[] = [];
   
-  // 1. Always keep the most recent system message
+  // Always keep the most recent system message
   if (systemMessages.length > 0) {
     keptMessages.push(systemMessages[systemMessages.length - 1]);
   }
   
-  // 2. Merge and sort recent messages by timestamp
+  // Merge and sort recent messages by timestamp
   const recentMessages = [...chatMessages, ...voiceVideoMessages]
     .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   
-  // 3. Keep recent tool messages that correspond to recent assistant messages
+  // Keep recent tool messages that correspond to recent assistant messages
   const recentMessageIds = new Set(
     recentMessages
       .filter(msg => msg.role === 'assistant' && msg.tool_calls)
@@ -98,11 +97,11 @@ function smartTrimConversation(conversation: Conversation): void {
     msg.tool_call_id && recentMessageIds.has(msg.tool_call_id)
   );
   
-  // 4. Combine all kept messages and sort by timestamp
+  // Combine all kept messages and sort by timestamp
   keptMessages = [...keptMessages, ...recentMessages, ...relevantToolMessages]
     .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   
-  // 5. Ensure we don't go below minimum
+  // Ensure we don't go below minimum
   if (keptMessages.length < MESSAGE_LIMITS.MIN_MESSAGES_TO_KEEP && messages.length > MESSAGE_LIMITS.MIN_MESSAGES_TO_KEEP) {
     const additionalNeeded = MESSAGE_LIMITS.MIN_MESSAGES_TO_KEEP - keptMessages.length;
     const additionalMessages = messages
@@ -112,7 +111,6 @@ function smartTrimConversation(conversation: Conversation): void {
       .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   }
   
-  // Update conversation
   conversation.messages = keptMessages;
   
   console.log(`[CONVERSATION] Trimmed to ${keptMessages.length} messages`);
@@ -191,9 +189,9 @@ export function logConversationContext(
   // Analyze message distribution by mode
   const messageStats = {
     system: 0,
-    chat: 0,      // RTM messages
-    voice: 0,     // Voice endpoint messages
-    video: 0,     // Video endpoint messages
+    chat: 0,
+    voice: 0,
+    video: 0,
     tool: 0,
     unspecified: 0
   };
@@ -303,6 +301,7 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
 
 /**
  * Simplified saveMessage with mode-based memory management
+ * Mode is stored internally but not sent to LLM
  */
 export async function saveMessage(
   appId: string, 
@@ -372,22 +371,20 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
       delete conversationStore[key];
       removedCount++;
     } else if (conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES) {
-      // Trim large conversations even if they're not old
       smartTrimConversation(conversation);
       trimmedCount++;
     }
   });
   
-  // Memory pressure cleanup - remove largest conversations if we're using too much memory
-  const MAX_TOTAL_MEMORY_MB = 50; // 50MB limit
+  // Memory pressure cleanup
+  const MAX_TOTAL_MEMORY_MB = 50;
   if (totalMemoryEstimate > MAX_TOTAL_MEMORY_MB * 1024 * 1024) {
     console.log(`[CONVERSATION] Memory pressure detected (${(totalMemoryEstimate / 1024 / 1024).toFixed(2)} MB), removing largest conversations`);
     
-    // Sort by size descending
     conversationSizes.sort((a, b) => b.size - a.size);
     
     let memoryFreed = 0;
-    const targetToFree = totalMemoryEstimate - (MAX_TOTAL_MEMORY_MB * 0.8 * 1024 * 1024); // Free to 80% of limit
+    const targetToFree = totalMemoryEstimate - (MAX_TOTAL_MEMORY_MB * 0.8 * 1024 * 1024);
     
     for (const { key, size } of conversationSizes) {
       if (memoryFreed >= targetToFree) break;
@@ -415,9 +412,9 @@ export function getConversationStats(): any {
   const now = Date.now();
   
   const modeStats = {
-    chat: 0,      // RTM messages
-    voice: 0,     // Voice endpoint messages
-    video: 0,     // Video endpoint messages
+    chat: 0,
+    voice: 0,
+    video: 0,
     unspecified: 0
   };
   
@@ -469,9 +466,8 @@ if (typeof window === 'undefined') {
     }
   }, CLEANUP_INTERVAL_MS);
   
-  console.log('[CONVERSATION] Simplified conversation store initialized with mode-based memory management');
+  console.log('[CONVERSATION] Conversation store initialized with mode-based memory management');
   console.log(`[CONVERSATION] Limits: ${MESSAGE_LIMITS.MAX_TOTAL_MESSAGES} max messages, ${MESSAGE_LIMITS.TARGET_MESSAGES} target, cleanup every ${CLEANUP_INTERVAL_MS / (60 * 1000)} minutes`);
 }
 
-// Export memory management functions for manual control
 export { smartTrimConversation, MESSAGE_LIMITS };

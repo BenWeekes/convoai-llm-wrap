@@ -1,10 +1,121 @@
 // File: lib/common/message-processor.ts
-// Processes messages, handling tool responses and caching
+// Updated to use content prefixes instead of non-standard properties
 
 import { getToolResponse } from './cache';
 
+// Mode prefix constants
+const MODE_PREFIXES = {
+  CHAT: '[CHAT]',
+  VIDEO: '[VIDEO CALL]',
+  VOICE: '[VOICE CALL]'
+} as const;
+
+/**
+ * Add mode prefix to message content based on mode
+ */
+export function addModePrefix(content: string, mode?: string): string {
+  // Don't add prefix if content already has one
+  if (content.startsWith('[CHAT]') || content.startsWith('[VIDEO CALL]') || content.startsWith('[VOICE CALL]')) {
+    return content;
+  }
+
+  switch (mode) {
+    case 'chat':
+      return `${MODE_PREFIXES.CHAT} ${content}`;
+    case 'video':
+      return `${MODE_PREFIXES.VIDEO} ${content}`;
+    case 'voice':
+      return `${MODE_PREFIXES.VOICE} ${content}`;
+    default:
+      return content; // No prefix for undefined/unknown modes
+  }
+}
+
+/**
+ * Extract mode from message content prefix
+ */
+export function extractModeFromContent(content: string): { mode?: string; cleanContent: string } {
+  if (content.startsWith(MODE_PREFIXES.CHAT)) {
+    return {
+      mode: 'chat',
+      cleanContent: content.slice(MODE_PREFIXES.CHAT.length).trim()
+    };
+  }
+  
+  if (content.startsWith(MODE_PREFIXES.VIDEO)) {
+    return {
+      mode: 'video',
+      cleanContent: content.slice(MODE_PREFIXES.VIDEO.length).trim()
+    };
+  }
+  
+  if (content.startsWith(MODE_PREFIXES.VOICE)) {
+    return {
+      mode: 'voice',
+      cleanContent: content.slice(MODE_PREFIXES.VOICE.length).trim()
+    };
+  }
+  
+  return {
+    cleanContent: content
+  };
+}
+
+/**
+ * Clean message for LLM by removing non-standard properties and adding mode prefixes
+ * Removes: mode, timestamp, and any other non-standard properties
+ * Keeps only: role, content, name, tool_calls, tool_call_id
+ */
+export function cleanMessageForLLM(message: any): any {
+  const cleaned: any = {
+    role: message.role,
+    content: message.content
+  };
+
+  // Add only standard OpenAI API properties if they exist
+  if (message.name) cleaned.name = message.name;
+  if (message.tool_calls) cleaned.tool_calls = message.tool_calls;
+  if (message.tool_call_id) cleaned.tool_call_id = message.tool_call_id;
+
+  // ONLY add mode prefix to USER messages, not assistant messages
+  // This prevents the LLM from learning to echo the prefixes back
+  if (message.role === 'user' && message.content && message.mode) {
+    cleaned.content = addModePrefix(message.content, message.mode);
+  }
+
+  // For assistant messages, clean any prefixes the LLM might have added
+  if (message.role === 'assistant' && message.content) {
+    const { cleanContent } = extractModeFromContent(message.content);
+    cleaned.content = cleanContent;
+  }
+
+  // Explicitly DO NOT include these non-standard properties:
+  // - mode (converted to content prefix for user messages only)
+  // - timestamp (internal tracking only)
+  // - any other custom properties
+
+  return cleaned;
+}
+
+/**
+ * Clean assistant response content by removing any mode prefixes
+ * This prevents the LLM from learning to echo prefixes back
+ */
+export function cleanAssistantResponse(content: string): string {
+  const { cleanContent } = extractModeFromContent(content);
+  return cleanContent;
+}
+
+/**
+ * Clean all messages in an array for LLM compatibility
+ */
+export function cleanMessagesForLLM(messages: any[]): any[] {
+  return messages.map(cleanMessageForLLM);
+}
+
 /**
  * Process messages and insert cached tool responses where needed
+ * Now also cleans messages for LLM compatibility
  */
 export function insertCachedToolResponses(messages: any[]): any[] {
   const processedMessages = [...messages];
@@ -112,5 +223,6 @@ export function insertCachedToolResponses(messages: any[]): any[] {
     });
   }
   
-  return processedMessages;
+  // Clean all messages for LLM compatibility before returning
+  return cleanMessagesForLLM(processedMessages);
 }

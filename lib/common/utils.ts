@@ -1,6 +1,5 @@
 // File: lib/common/utils.ts
-// Common utility functions shared across endpoints
-// Enhanced with configurable debug logging
+// Updated to remove all Llama-specific functions and special casing
 
 import OpenAI from 'openai';
 import { CONFIG } from './cache';
@@ -139,68 +138,8 @@ export function validateToken(authHeader: string | null, expectedToken: string):
   return token === expectedToken;
 }
 
-/**
- * Check if a model needs special handling
- */
-export function modelRequiresSpecialHandling(model: string): boolean {
-  // List of models that might need special handling
-  const specialModels = [
-    'mistral', 
-    'mixtral',
-    'claude',
-    'falcon',
-    'command',
-    'cohere',
-    'gemini'
-  ];
-  
-  // Check if the model name contains any of the special model identifiers
-  return specialModels.some(specialModel => 
-    model.toLowerCase().includes(specialModel.toLowerCase())
-  );
-}
-
-/**
- * Check if this is a follow-up with tool responses
- */
-export function isFollowUpWithToolResponsesPresent(messages: any[]): boolean {
-  for (let i = 0; i < messages.length - 1; i++) {
-    // Look for an assistant message with tool_calls followed by a tool response
-    if (
-      messages[i].role === 'assistant' && 
-      messages[i].tool_calls && 
-      messages[i+1].role === 'tool'
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Simplify messages for Llama models
- */
-export function simplifyMessagesForLlama(messages: any[]): any[] {
-  // If this is a follow-up message after a tool call, simplify the history
-  if (isFollowUpWithToolResponsesPresent(messages)) {
-    const systemMessages = messages.filter(m => m.role === 'system');
-    
-    // Find the last user message
-    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
-    
-    if (lastUserMessage) {
-      // Create a simpler history
-      console.log("Simplifying message history for Llama model follow-up");
-      return [...systemMessages, lastUserMessage];
-    }
-  }
-  
-  // Otherwise return the original messages
-  return messages;
-}
-
 // ============================================================================
-// NEW DEBUG LOGGING FUNCTIONS WITH CONFIGURATION
+// DEBUG LOGGING FUNCTIONS WITH CONFIGURATION
 // ============================================================================
 
 /**
@@ -232,21 +171,20 @@ export function logLLMRequest(requestParams: any, context: {
   
   console.log(`\n💬 MESSAGES BEING SENT TO LLM (${requestParams.messages.length} total):`);
   requestParams.messages.forEach((msg: any, index: number) => {
-    const modeInfo = msg.mode ? ` [MODE: ${msg.mode}]` : '';
     const truncatedContent = msg.content ? 
       (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content) : 
       '[no content]';
     
     if (msg.role === 'system') {
-      console.log(`[${index}] 🎯 SYSTEM${modeInfo}:`);
+      console.log(`[${index}] 🎯 SYSTEM:`);
       console.log(`    ${truncatedContent}`);
     } else if (msg.role === 'user') {
-      console.log(`[${index}] 👤 USER${modeInfo}: ${truncatedContent}`);
+      console.log(`[${index}] 👤 USER: ${truncatedContent}`);
     } else if (msg.role === 'assistant') {
       if (msg.tool_calls) {
-        console.log(`[${index}] 🤖 ASSISTANT${modeInfo}: [${msg.tool_calls.length} tool calls]`);
+        console.log(`[${index}] 🤖 ASSISTANT: [${msg.tool_calls.length} tool calls]`);
       } else {
-        console.log(`[${index}] 🤖 ASSISTANT${modeInfo}: ${truncatedContent}`);
+        console.log(`[${index}] 🤖 ASSISTANT: ${truncatedContent}`);
       }
     } else if (msg.role === 'tool') {
       console.log(`[${index}] 🔧 TOOL (${msg.name || 'unknown'}): ${truncatedContent}`);

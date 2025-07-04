@@ -1,15 +1,14 @@
 // lib/common/endpoint-factory.ts
 // Factory function to create standardized endpoint handlers
-// Simplified to use only mode property (chat = RTM, voice/video = endpoints)
+// Updated to use cleaned, compliant messages for all LLMs
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import type { RequestWithJson, EndpointConfig } from '../types';
 import { validateToken, logFullResponse, generateCallId, safeJSONParse, extractCommands, logLLMRequest, logLLMResponse, logStreamingChunk, logModeTransition } from './utils';
 import { logCacheState, storeToolResponse } from './cache';
-import { insertCachedToolResponses } from './message-processor';
+import { insertCachedToolResponses, cleanMessagesForLLM, cleanAssistantResponse } from './message-processor';
 import { handleModelRequest } from './model-handler';
-import { simplifyMessagesForLlama, isFollowUpWithToolResponsesPresent } from './utils';
 import { getOrCreateConversation, saveMessage } from './conversation-store';
 import rtmClientManager, { RTMClientParams } from './rtm-client-manager';
 import endpointChatManager from './rtm-chat-handler';
@@ -96,10 +95,13 @@ async function executeToolCall(
       }
     ];
     
+    // CLEAN MESSAGES FOR LLM COMPATIBILITY
+    const cleanedMessages = cleanMessagesForLLM(updatedMessages);
+    
     // Make final streaming request
     const finalStreamParams: any = {
       model,
-      messages: updatedMessages,
+      messages: cleanedMessages, // Use cleaned messages
       stream: true
     };
 
@@ -108,7 +110,7 @@ async function executeToolCall(
       finalStreamParams.tool_choice = "auto";
     }
 
-    console.log(`🔄 Making final stream request with ${updatedMessages.length} messages`);
+    console.log(`🔄 Making final stream request with ${cleanedMessages.length} cleaned messages`);
     
     // LOG THE FINAL REQUEST AFTER TOOL EXECUTION
     logLLMRequest(finalStreamParams, {
@@ -116,7 +118,7 @@ async function executeToolCall(
       appId,
       channel,
       endpointMode,
-      conversationLength: updatedMessages.length
+      conversationLength: cleanedMessages.length
     });
     
     const finalResponse = await handleModelRequest(openai, finalStreamParams);
@@ -224,7 +226,7 @@ function endStream(
 
 /**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
- * Simplified to use only mode property (chat = RTM, voice/video = endpoints)
+ * All LLMs receive identical, cleaned, compliant messages
  */
 export function createEndpointHandler(config: EndpointConfig, endpointName?: string) {
   return async function endpointHandler(req: RequestWithJson) {
@@ -459,11 +461,9 @@ AVAILABLE MODES: chat`;
         }
       }
 
-      // Check if simplification is needed based on message context
-      if (isFollowUpWithToolResponsesPresent(processedRequestMessages)) {
-        const existingWithoutSystem = existingConversation.messages.filter(msg => msg.role !== 'system');
-        finalMessages = [systemMessage, ...simplifyMessagesForLlama([...existingWithoutSystem, ...processedRequestMessages])];
-      }
+      // CLEAN MESSAGES FOR LLM COMPATIBILITY BEFORE SENDING
+      // All models receive the same standardized, compliant messages
+      const cleanedFinalMessages = cleanMessagesForLLM(finalMessages);
 
       // Common request parameters
       const commonRequestParams: any = {
@@ -485,7 +485,7 @@ AVAILABLE MODES: chat`;
       if (stream) {
         try {
           // Set up streaming parameters
-          const streamParams = { ...commonRequestParams, messages: finalMessages, stream: true };
+          const streamParams = { ...commonRequestParams, messages: cleanedFinalMessages, stream: true };
           
           // LOG THE REQUEST TO LLM - STREAMING
           console.log(`\n🚀 ABOUT TO MAKE STREAMING LLM REQUEST`);
@@ -526,10 +526,10 @@ AVAILABLE MODES: chat`;
               try {
                 let inCommand = false;
                 let commandBuffer = '';
-                let chunkIndex = 0; // ADD CHUNK COUNTER
+                let chunkIndex = 0;
                 
                 for await (const part of streamingResponse) {
-                  chunkIndex++; // INCREMENT CHUNK COUNTER
+                  chunkIndex++;
                   if (controllerClosed.value) continue;
                   
                   const chunk = part.choices?.[0];
@@ -677,7 +677,7 @@ AVAILABLE MODES: chat`;
                         appId,
                         userId,
                         channel,
-                        finalMessages,
+                        cleanedFinalMessages, // Use cleaned messages
                         openai,
                         model,
                         simplifiedTools,
@@ -698,13 +698,17 @@ AVAILABLE MODES: chat`;
                       
                       // Save assistant response to conversation with mode
                       if (accumulatedContent.trim()) {
+                        // Clean any mode prefixes the LLM might have added
+                        const cleanedContent = cleanAssistantResponse(accumulatedContent.trim());
+                        
                         console.log(`💾 SAVING ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'}`);
-                        console.log(`💾 Response content length: ${accumulatedContent.trim().length} chars`);
-                        console.log(`💾 Response preview: ${accumulatedContent.trim().substring(0, 100)}${accumulatedContent.length > 100 ? '...' : ''}`);
+                        console.log(`💾 Original content length: ${accumulatedContent.trim().length} chars`);
+                        console.log(`💾 Cleaned content length: ${cleanedContent.length} chars`);
+                        console.log(`💾 Cleaned preview: ${cleanedContent.substring(0, 100)}${cleanedContent.length > 100 ? '...' : ''}`);
                         
                         await saveMessage(appId, userId, {
                           role: 'assistant',
-                          content: accumulatedContent.trim(),
+                          content: cleanedContent,
                           mode: endpointMode // Add mode if specified (voice/video for endpoints)
                         });
                       }
@@ -733,13 +737,17 @@ AVAILABLE MODES: chat`;
                 
                 // Save assistant response to conversation with mode
                 if (accumulatedContent.trim()) {
+                  // Clean any mode prefixes the LLM might have added
+                  const cleanedContent = cleanAssistantResponse(accumulatedContent.trim());
+                  
                   console.log(`💾 SAVING FINAL ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'}`);
-                  console.log(`💾 Response content length: ${accumulatedContent.trim().length} chars`);
-                  console.log(`💾 Response preview: ${accumulatedContent.trim().substring(0, 100)}${accumulatedContent.length > 100 ? '...' : ''}`);
+                  console.log(`💾 Original content length: ${accumulatedContent.trim().length} chars`);
+                  console.log(`💾 Cleaned content length: ${cleanedContent.length} chars`);
+                  console.log(`💾 Cleaned preview: ${cleanedContent.substring(0, 100)}${cleanedContent.length > 100 ? '...' : ''}`);
                   
                   await saveMessage(appId, userId, {
                     role: 'assistant',
-                    content: accumulatedContent.trim(),
+                    content: cleanedContent,
                     mode: endpointMode // Add mode if specified (voice/video for endpoints)
                   });
                 }
@@ -801,7 +809,7 @@ AVAILABLE MODES: chat`;
         // =====================
         // NON-STREAMING WITH MULTI-PASS TOOL CALLING
         // =====================
-        let updatedMessages = [...finalMessages];
+        let updatedMessages = [...cleanedFinalMessages]; // Use cleaned messages
         let passCount = 0;
         const maxPasses = 5;
         let finalResp: any = null;
@@ -924,13 +932,17 @@ AVAILABLE MODES: chat`;
 
         // Save assistant response to conversation with mode
         if (accumulatedText.trim()) {
+          // Clean any mode prefixes the LLM might have added
+          const cleanedText = cleanAssistantResponse(accumulatedText.trim());
+          
           console.log(`💾 SAVING NON-STREAMING ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'}`);
-          console.log(`💾 Response content length: ${accumulatedText.trim().length} chars`);
-          console.log(`💾 Response preview: ${accumulatedText.trim().substring(0, 100)}${accumulatedText.length > 100 ? '...' : ''}`);
+          console.log(`💾 Original content length: ${accumulatedText.trim().length} chars`);
+          console.log(`💾 Cleaned content length: ${cleanedText.length} chars`);
+          console.log(`💾 Cleaned preview: ${cleanedText.substring(0, 100)}${cleanedText.length > 100 ? '...' : ''}`);
           
           await saveMessage(appId, userId, {
             role: 'assistant',
-            content: accumulatedText.trim(),
+            content: cleanedText,
             mode: endpointMode // Add mode if specified (voice/video for endpoints)
           });
         }
