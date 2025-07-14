@@ -1,5 +1,5 @@
 // File: lib/endpoints/example-endpoint.ts
-// Fixed to handle null/empty args in send_photo function
+// Conversation-based rate limiting for photo sends across RTM and video calls
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -27,6 +27,15 @@ function exampleSystemTemplate(ragData: Record<string, string>): string {
     - In CHAT mode: Encourage video calls e.g. "Want to video chat? 😘📹" or "Let's switch to video call baby! 📹💋"  
     - In VIDEO mode: You can suggest return to chat if the conversation seems complete for now: "Ready to hang up baby?"
     - Look at conversation history to see mode transitions and respond appropriately
+    
+    PHOTO SENDING RULES - READ CAREFULLY:
+    - ONLY use the send_photo tool when the user EXPLICITLY asks for a photo
+    - Examples of explicit requests: "send me a photo", "can you send a pic", "show me a picture", "send photo please"
+    - DO NOT send photos for: greetings, thanks, confirmations, casual conversation, or general compliments
+    - DO NOT send photos when user says: "thanks", "that's right", "ok", "cool", "nice", etc.
+    - If you already sent a photo in this conversation, wait for another explicit request
+    - If user asks for multiple photos quickly, politely explain you prefer to send one at a time
+    - Example responses when declining: "I'd love to send more photos! Just ask when you'd like to see another one 😊"
     
     You have access to the following knowledge:
     doc1: "${ragData.doc1}"
@@ -81,13 +90,65 @@ const EXAMPLE_TOOLS: OpenAI.ChatCompletionTool[] = [
 
 // Available photo options for randomization
 const PHOTO_OPTIONS = [
-  "april_sit_kiss.png",
-  "april_sit_smile.png", 
-  "april_reach_camera.png",
-  "april_lie_wink.png",
-  "april_lie_smile.png",
-  "april_lie_kiss.png"
+  "bella1.png"
 ];
+
+// Enhanced photo rate limiting
+const PHOTO_RATE_LIMIT_MS = 30000; // 30 seconds between photos
+
+// Simple counter-based approach - tracks photo sends per user
+const recentPhotoSends = new Map<string, number>();
+
+// Helper function to check recent photo sends
+async function hasRecentPhotoSend(appId: string, userId: string, timeWindowMs: number): Promise<boolean> {
+  try {
+    const userKey = `${appId}:${userId}`;
+    const now = Date.now();
+    const lastPhotoTime = recentPhotoSends.get(userKey) || 0;
+    const timeSinceLastPhoto = now - lastPhotoTime;
+    
+    console.log(`📸 CHECKING RECENT PHOTO SENDS: userKey=${userKey}, timeSinceLastPhoto=${timeSinceLastPhoto}ms, timeWindow=${timeWindowMs}ms`);
+    
+    // Check timestamp-based rate limiting
+    if (timeSinceLastPhoto < timeWindowMs) {
+      const remainingTime = Math.ceil((timeWindowMs - timeSinceLastPhoto) / 1000);
+      console.log(`📸 TIMESTAMP RATE LIMITED: ${timeSinceLastPhoto}ms ago, ${remainingTime}s remaining`);
+      return true;
+    }
+    
+    console.log(`📸 NO RECENT PHOTO ACTIVITY: Last photo was ${timeSinceLastPhoto}ms ago`);
+    return false;
+  } catch (error) {
+    console.error('📸 ERROR checking recent photo sends:', error);
+    return false; // Default to allowing if we can't check
+  }
+}
+
+// Helper function to mark a photo as sent
+function markPhotoSent(appId: string, userId: string): void {
+  const userKey = `${appId}:${userId}`;
+  const now = Date.now();
+  recentPhotoSends.set(userKey, now);
+  
+  console.log(`📸 MARKED PHOTO SENT: userKey=${userKey}, timestamp=${now}`);
+  
+  // Clean up old entries to prevent memory leaks
+  const cutoff = now - (PHOTO_RATE_LIMIT_MS * 2); // Keep entries for 2x the rate limit
+  let cleanedCount = 0;
+  
+  // Fixed iteration: Convert entries to array first
+  const entries = Array.from(recentPhotoSends.entries());
+  for (const [key, timestamp] of entries) {
+    if (timestamp < cutoff) {
+      recentPhotoSends.delete(key);
+      cleanedCount++;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`📸 CLEANED UP ${cleanedCount} old photo send entries`);
+  }
+}
 
 // Implement the tool functions with enhanced logging
 function order_sandwich(appId: string, userId: string, channel: string, args: any): string {
@@ -107,6 +168,16 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
   const subject = args?.subject || "default";
 
   console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject, argsReceived: args });
+  
+  // Enhanced rate limiting check using timestamps only
+  const hasRecentPhoto = await hasRecentPhotoSend(appId, userId, PHOTO_RATE_LIMIT_MS);
+  
+  if (hasRecentPhoto) {
+    const cooldownMessage = `I just sent you a photo recently! Let's chat a bit more before I send another one 😊`;
+    console.log(`📸 RATE LIMITED: ${cooldownMessage}`);
+    return cooldownMessage;
+  }
+  
   console.log(`📸 Sending ${subject} photo to ${userId} in ${channel}`);
   
   // Check environment variables - for RTM chat, use the RTM-specific from user
@@ -131,6 +202,9 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
   console.log(`📸 Full image URL: ${imageUrl}`);
   console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}, channel: ${channel}`);
   
+  // Mark photo as sent BEFORE attempting to send (prevents race conditions)
+  markPhotoSent(appId, userId);
+  
   try {
     // Send photo with 3 second delay (non-blocking)
     const success = await sendPhotoMessage(
@@ -150,7 +224,7 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
       console.log(`📸 FAILURE: ${result}`);
     }
     
-    console.log(`📸 PHOTO TOOL RESULT:`, result);
+    console.log(`📸 PHOTO TOOL RESULT: ${result}`);
     return result;
   } catch (error) {
     console.error(`📸 PHOTO TOOL ERROR:`, error);
@@ -191,6 +265,7 @@ console.log('🔧 Example endpoint tool map configured with tools:', Object.keys
 console.log('🔧 send_photo function type:', typeof EXAMPLE_TOOL_MAP.send_photo);
 console.log('🔧 order_sandwich function type:', typeof EXAMPLE_TOOL_MAP.order_sandwich);
 console.log('📸 Available photo options:', PHOTO_OPTIONS);
+console.log('📸 Photo rate limit configured:', PHOTO_RATE_LIMIT_MS, 'ms (timestamp-based)');
 
 // Export the complete endpoint configuration with communication modes
 export const exampleEndpointConfig: EndpointConfig = {
