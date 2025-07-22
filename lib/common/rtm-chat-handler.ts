@@ -1,6 +1,7 @@
 // lib/common/rtm-chat-handler.ts
 // Shared RTM chat handler that any endpoint can use for seamless voice/chat integration
 // Enhanced with communication mode support
+// FIXED: Store model in session to avoid re-reading from environment
 
 import rtmClientManager from './rtm-client-manager';
 import { getOrCreateConversation, saveMessage } from './conversation-store';
@@ -18,6 +19,8 @@ interface EndpointChatSession {
   rtmClient: any;
   openai: OpenAI;
   environmentPrefix: string;
+  model: string; // ADDED: Store model to avoid re-reading from env
+  baseURL: string; // ADDED: Store baseURL for consistency
 }
 
 class EndpointChatManager {
@@ -76,6 +79,7 @@ class EndpointChatManager {
       }
 
       console.log(`[RTM-CHAT] Initializing ${endpointName} chat with appId: ${appId}, user: ${fromUser}, channel: ${channel}`);
+      console.log(`[RTM-CHAT] Using model: ${model}, baseURL: ${baseURL}`); // Log the stored values
 
       // Create OpenAI client
       const openai = new OpenAI({
@@ -97,13 +101,15 @@ class EndpointChatManager {
         return false;
       }
 
-      // Store session
+      // Store session with model and baseURL cached
       const session: EndpointChatSession = {
         config,
         currentSystemMessage: null, // Start with default prompt
         rtmClient,
         openai,
-        environmentPrefix: envPrefix
+        environmentPrefix: envPrefix,
+        model: model,     // FIXED: Store model value
+        baseURL: baseURL  // ADDED: Store baseURL for consistency
       };
 
       this.activeSessions.set(sessionKey, session);
@@ -117,6 +123,7 @@ class EndpointChatManager {
       );
 
       console.log(`[RTM-CHAT] ${endpointName} chat initialized successfully (supports chat + ${config.communicationModes?.endpointMode || 'unknown'})`);
+      console.log(`[RTM-CHAT] Cached model: ${session.model}, baseURL: ${session.baseURL}`);
       return true;
 
     } catch (error) {
@@ -279,15 +286,15 @@ AVAILABLE MODES: chat`;
         }
       }
 
-      // Create LLM request
+      // Create LLM request using cached model value
       const requestParams: any = {
-        model: process.env[`${session.environmentPrefix}_LLM_MODEL`] || 'gpt-4o-mini',
+        model: session.model,  // FIXED: Use cached model instead of re-reading from env
         messages,
         tools: session.config.tools,
         tool_choice: 'auto'
       };
 
-      console.log(`[RTM-CHAT] Making LLM request with ${messages.length} messages`);
+      console.log(`[RTM-CHAT] Making LLM request with ${messages.length} messages using model: ${session.model}`);
 
       // Handle multi-pass tool calling
       let passCount = 0;
@@ -487,7 +494,9 @@ AVAILABLE MODES: chat`;
       supportsChat: session.config.communicationModes?.supportsChat || false,
       endpointMode: session.config.communicationModes?.endpointMode || 'none',
       environmentPrefix: session.environmentPrefix,
-      hasCustomSystemMessage: !!session.currentSystemMessage
+      hasCustomSystemMessage: !!session.currentSystemMessage,
+      model: session.model,        // ADDED: Show cached model
+      baseURL: session.baseURL     // ADDED: Show cached baseURL
     };
   }
 }

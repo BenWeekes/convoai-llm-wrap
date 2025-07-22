@@ -1,0 +1,1 @@
+curl -X POST -H "Authorization: Bearer my_secret_token"   -H "Content-Type: application/json"   -d '{"appId":"test","messages":[{"role":"user","content":"hello"}]}'   http://localhost:3040/v1/chat/example
