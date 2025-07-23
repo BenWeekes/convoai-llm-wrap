@@ -169,8 +169,16 @@ function extractUserIdForDisplay(content: string): { userId?: string; cleanConte
   // Check for [userId] prefix pattern
   const match = content.match(/^\[([^\]]+)\]\s*(.*)/);
   if (match) {
+    let userId = match[1];
+    
+    // If userId contains '-', split on last occurrence and use first part as display name
+    const lastDashIndex = userId.lastIndexOf('-');
+    if (lastDashIndex !== -1) {
+      userId = userId.substring(0, lastDashIndex);
+    }
+    
     return {
-      userId: match[1],
+      userId: userId,
       cleanContent: match[2]
     };
   }

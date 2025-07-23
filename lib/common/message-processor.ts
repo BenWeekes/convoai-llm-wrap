@@ -95,6 +95,32 @@ export function extractUserIdFromContent(content: string): { userId?: string; cl
 }
 
 /**
+ * Extract the actual user ID from message metadata or fallback to provided userId
+ * This is crucial for group conversations where different users send messages
+ */
+function getActualUserId(message: any, fallbackUserId?: string): string | undefined {
+  // Check for metadata with publisher/user information
+  if (message.metadata) {
+    // Priority 1: Use publisher field from metadata
+    if (message.metadata.publisher) {
+      return message.metadata.publisher;
+    }
+    // Priority 2: Use user field from metadata
+    if (message.metadata.user) {
+      return message.metadata.user;
+    }
+  }
+  
+  // Priority 3: Check if message has a direct userId field
+  if (message.userId) {
+    return message.userId;
+  }
+  
+  // Priority 4: Use the fallback userId provided
+  return fallbackUserId;
+}
+
+/**
  * Clean message for LLM by removing non-standard properties and adding prefixes
  * Removes: mode, timestamp, and any other non-standard properties
  * Keeps only: role, content, name, tool_calls, tool_call_id
@@ -120,9 +146,14 @@ export function cleanMessageForLLM(message: any, options?: {
     let processedContent = message.content;
     
     // FIRST: Add user ID prefix when enabled (only for user messages)
-    if (options?.prependUserId && options?.userId) {
-      processedContent = addUserIdPrefix(processedContent, options.userId);
-      console.log(`[MESSAGE-PROCESSOR] Added user ID prefix: [${options.userId}] ${message.content.substring(0, 50)}...`);
+    if (options?.prependUserId) {
+      // Get the actual user ID from metadata or fallback
+      const actualUserId = getActualUserId(message, options?.userId);
+      
+      if (actualUserId) {
+        processedContent = addUserIdPrefix(processedContent, actualUserId);
+        console.log(`[MESSAGE-PROCESSOR] Added user ID prefix: [${actualUserId}] ${message.content.substring(0, 50)}...`);
+      }
     }
     
     // SECOND: Add mode prefix if specified and enabled (only for user messages)
@@ -140,6 +171,8 @@ export function cleanMessageForLLM(message: any, options?: {
   // Explicitly DO NOT include these non-standard properties:
   // - mode (converted to content prefix for user messages only)
   // - timestamp (internal tracking only)
+  // - metadata (used for user extraction but not sent to LLM)
+  // - turn_id (internal tracking only)
   // - any other custom properties
 
   return cleaned;
