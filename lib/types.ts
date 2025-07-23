@@ -1,5 +1,6 @@
 // File: lib/types.ts
 // Contains all shared type definitions - simplified without source property
+// Added prependUserId configuration option
 
 import type OpenAI from 'openai';
 
@@ -54,6 +55,8 @@ export interface EndpointConfig {
   communicationModes?: {
     supportsChat?: boolean;      // Enable RTM chat mode
     endpointMode?: 'voice' | 'video'; // What mode for API calls
+    prependUserId?: boolean;     // Enable user ID prepending to messages
+    prependCommunicationMode?: boolean; // Enable communication mode prefixing to messages
   };
 }
 

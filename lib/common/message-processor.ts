@@ -1,5 +1,6 @@
 // File: lib/common/message-processor.ts
 // Updated to use content prefixes instead of non-standard properties
+// Added group call user ID prepending functionality
 
 import { getToolResponse } from './cache';
 
@@ -29,6 +30,19 @@ export function addModePrefix(content: string, mode?: string): string {
     default:
       return content; // No prefix for undefined/unknown modes
   }
+}
+
+/**
+ * Add user ID prefix to message content for group calls
+ * Format: [userId] message content
+ */
+export function addUserIdPrefix(content: string, userId: string): string {
+  // Don't add prefix if content already has a user ID prefix pattern
+  if (content.match(/^\[[^\]]+\]/)) {
+    return content;
+  }
+
+  return `[${userId}] ${content}`;
 }
 
 /**
@@ -62,11 +76,35 @@ export function extractModeFromContent(content: string): { mode?: string; cleanC
 }
 
 /**
- * Clean message for LLM by removing non-standard properties and adding mode prefixes
+ * Extract user ID from message content prefix
+ * Returns the user ID and content without the user ID prefix
+ */
+export function extractUserIdFromContent(content: string): { userId?: string; cleanContent: string } {
+  const userIdMatch = content.match(/^\[([^\]]+)\]\s*(.*)/);
+  
+  if (userIdMatch) {
+    return {
+      userId: userIdMatch[1],
+      cleanContent: userIdMatch[2]
+    };
+  }
+  
+  return {
+    cleanContent: content
+  };
+}
+
+/**
+ * Clean message for LLM by removing non-standard properties and adding prefixes
  * Removes: mode, timestamp, and any other non-standard properties
  * Keeps only: role, content, name, tool_calls, tool_call_id
+ * Adds mode prefixes and user ID prefixes when enabled
  */
-export function cleanMessageForLLM(message: any): any {
+export function cleanMessageForLLM(message: any, options?: { 
+  prependUserId?: boolean; 
+  userId?: string;
+  prependCommunicationMode?: boolean;
+}): any {
   const cleaned: any = {
     role: message.role,
     content: message.content
@@ -77,14 +115,24 @@ export function cleanMessageForLLM(message: any): any {
   if (message.tool_calls) cleaned.tool_calls = message.tool_calls;
   if (message.tool_call_id) cleaned.tool_call_id = message.tool_call_id;
 
-  // ONLY add mode prefix to USER messages, not assistant messages
-  // This prevents the LLM from learning to echo the prefixes back
-  if (message.role === 'user' && message.content && message.mode) {
-    cleaned.content = addModePrefix(message.content, message.mode);
-  }
-
-  // For assistant messages, clean any prefixes the LLM might have added
-  if (message.role === 'assistant' && message.content) {
+  // Process content based on message role and options
+  if (message.role === 'user' && message.content) {
+    let processedContent = message.content;
+    
+    // FIRST: Add user ID prefix when enabled (only for user messages)
+    if (options?.prependUserId && options?.userId) {
+      processedContent = addUserIdPrefix(processedContent, options.userId);
+      console.log(`[MESSAGE-PROCESSOR] Added user ID prefix: [${options.userId}] ${message.content.substring(0, 50)}...`);
+    }
+    
+    // SECOND: Add mode prefix if specified and enabled (only for user messages)
+    if (message.mode && options?.prependCommunicationMode) {
+      processedContent = addModePrefix(processedContent, message.mode);
+    }
+    
+    cleaned.content = processedContent;
+  } else if (message.role === 'assistant' && message.content) {
+    // For assistant messages, clean any prefixes the LLM might have added
     const { cleanContent } = extractModeFromContent(message.content);
     cleaned.content = cleanContent;
   }
@@ -108,16 +156,25 @@ export function cleanAssistantResponse(content: string): string {
 
 /**
  * Clean all messages in an array for LLM compatibility
+ * Enhanced to support user ID prefixing and communication mode prefixing when enabled
  */
-export function cleanMessagesForLLM(messages: any[]): any[] {
-  return messages.map(cleanMessageForLLM);
+export function cleanMessagesForLLM(messages: any[], options?: { 
+  prependUserId?: boolean; 
+  userId?: string;
+  prependCommunicationMode?: boolean;
+}): any[] {
+  return messages.map(message => cleanMessageForLLM(message, options));
 }
 
 /**
  * Process messages and insert cached tool responses where needed
- * Now also cleans messages for LLM compatibility
+ * Now also cleans messages for LLM compatibility with optional user ID and communication mode prefixing
  */
-export function insertCachedToolResponses(messages: any[]): any[] {
+export function insertCachedToolResponses(messages: any[], options?: { 
+  prependUserId?: boolean; 
+  userId?: string;
+  prependCommunicationMode?: boolean;
+}): any[] {
   const processedMessages = [...messages];
   let insertedCount = 0;
   
@@ -223,6 +280,6 @@ export function insertCachedToolResponses(messages: any[]): any[] {
     });
   }
   
-  // Clean all messages for LLM compatibility before returning
-  return cleanMessagesForLLM(processedMessages);
+  // Clean all messages for LLM compatibility before returning, with user ID prefixing support
+  return cleanMessagesForLLM(processedMessages, options);
 }

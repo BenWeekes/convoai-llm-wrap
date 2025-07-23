@@ -1,6 +1,7 @@
 // lib/services/rtm-service.ts
 // Enhanced with mode context and typing indicators
 // RTM always uses mode: 'chat'
+// UPDATED: Now uses channel-based conversation storage
 
 import AgoraRTM from 'rtm-nodejs';
 import { getOrCreateConversation, saveMessage, detectModeTransition } from '../common/conversation-store';
@@ -63,8 +64,8 @@ class RTMService {
       await this.rtmClient.login(options);
       console.log(`[RTM] Successfully logged in as ${userId}`);
       
-      // Initialize system message for RTM (only once per user)
-      await this.initializeRTMSystemMessage(appId, userId);
+      // Initialize system message for RTM (only once per user) - NOW CHANNEL-SPECIFIC
+      await this.initializeRTMSystemMessage(appId, userId, this.channelName);
       
       this.initialized = true;
       return true;
@@ -76,8 +77,9 @@ class RTMService {
   
   /**
    * Initialize the RTM system message (called once when RTM starts)
+   * UPDATED: Now uses channel-based conversation storage
    */
-  private async initializeRTMSystemMessage(appId: string, userId: string): Promise<void> {
+  private async initializeRTMSystemMessage(appId: string, userId: string, channel: string): Promise<void> {
     try {
       // Create the initial RTM system message
       let rtmSystemContent = process.env.RTM_LLM_PROMPT || 
@@ -89,18 +91,18 @@ class RTMService {
 CURRENT COMMUNICATION MODE: CHAT (user is texting you via RTM - they can only see text)
 AVAILABLE MODES: chat, video`;
       
-      console.log(`[RTM] Initializing system message for ${userId}`);
+      console.log(`[RTM] Initializing system message for ${userId} in channel ${channel}`);
       
-      // Save the system message with chat mode (RTM = chat)
-      await saveMessage(appId, userId, {
+      // Save the system message with chat mode (RTM = chat) - NOW CHANNEL-SPECIFIC
+      await saveMessage(appId, userId, channel, {
         role: 'system',
         content: rtmSystemContent,
         mode: 'chat'
       });
       
-      console.log(`[RTM] RTM system message initialized for ${userId}`);
+      console.log(`[RTM] RTM system message initialized for ${userId} in channel ${channel}`);
     } catch (error) {
-      console.error(`[RTM] Failed to initialize system message for ${userId}:`, error);
+      console.error(`[RTM] Failed to initialize system message for ${userId} in channel ${channel}:`, error);
     }
   }
   
@@ -152,7 +154,7 @@ AVAILABLE MODES: chat, video`;
           }
         }
         
-        // LOG RTM MESSAGE PROCESSING
+        // LOG RTM MESSAGE PROCESSING - NOW WITH CHANNEL CONTEXT
         logRTMMessageProcessing({
           userId: event.publisher,
           appId,
@@ -171,25 +173,25 @@ AVAILABLE MODES: chat, video`;
           trigger: 'rtm_message'
         });
         
-        console.log(`[RTM] PROCESSED MESSAGE from ${event.publisher}:`, messageContent);
+        console.log(`[RTM] PROCESSED MESSAGE from ${event.publisher} in channel ${this.channelName}:`, messageContent);
         const model = process.env.RTM_LLM_MODEL || 'gpt-4o-mini';
         const baseURL = process.env.RTM_LLM_BASE_URL || 'https://api.openai.com/v1';
         
-        // Get or create conversation
-        const conversation = await getOrCreateConversation(appId, userId);
+        // Get or create conversation - NOW CHANNEL-SPECIFIC
+        const conversation = await getOrCreateConversation(appId, userId, this.channelName);
         
         // DETECT MODE TRANSITION - Check if user just came from video
         const modeTransition = detectModeTransition(conversation);
-        console.log(`[RTM] Mode transition analysis:`, modeTransition);
+        console.log(`[RTM] Mode transition analysis for channel ${this.channelName}:`, modeTransition);
         
-        // Add user message with CHAT mode (RTM = chat)
-        await saveMessage(appId, userId, {
+        // Add user message with CHAT mode (RTM = chat) - NOW CHANNEL-SPECIFIC
+        await saveMessage(appId, userId, this.channelName, {
           role: 'user',
           content: messageContent,
           mode: 'chat'
         });
         
-        console.log(`[RTM] SAVED USER MESSAGE with mode: chat`);
+        console.log(`[RTM] SAVED USER MESSAGE with mode: chat for ${userId} in channel ${this.channelName}`);
         
         // Process with LLM
         const openai = new OpenAI({
@@ -197,8 +199,8 @@ AVAILABLE MODES: chat, video`;
           baseURL
         });
         
-        // Get updated conversation - system message is already managed by conversation store
-        const updatedConversation = await getOrCreateConversation(appId, userId);
+        // Get updated conversation - system message is already managed by conversation store - NOW CHANNEL-SPECIFIC
+        const updatedConversation = await getOrCreateConversation(appId, userId, this.channelName);
         const messages = updatedConversation.messages; // Use existing messages with managed system message
         
         // Create request parameters
@@ -210,7 +212,7 @@ AVAILABLE MODES: chat, video`;
         };
         
         // LOG THE RTM LLM REQUEST
-        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT`);
+        console.log(`[RTM] 🚀 MAKING LLM REQUEST FOR RTM CHAT in channel ${this.channelName}`);
         logLLMRequest(requestParams, {
           userId,
           appId,
@@ -237,24 +239,24 @@ AVAILABLE MODES: chat, video`;
         
         // Handle tool calls if present
         if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
-          console.log(`[RTM] 🔧 Processing ${choice.message.tool_calls.length} tool calls`);
+          console.log(`[RTM] 🔧 Processing ${choice.message.tool_calls.length} tool calls for channel ${this.channelName}`);
           
           for (const toolCall of choice.message.tool_calls) {
             const toolName = toolCall.function.name;
             const toolArgs = JSON.parse(toolCall.function.arguments || '{}');
             
-            console.log(`[RTM] 🔧 Executing tool: ${toolName}`, toolArgs);
+            console.log(`[RTM] 🔧 Executing tool: ${toolName} in channel ${this.channelName}`, toolArgs);
             
             // Handle all tools using the proper endpoint toolMap
             if (exampleEndpointConfig.toolMap[toolName]) {
               try {
                 const toolResult = await exampleEndpointConfig.toolMap[toolName](appId, userId, this.channelName, toolArgs);
-                console.log(`[RTM] 🔧 Tool ${toolName} result:`, toolResult);
+                console.log(`[RTM] 🔧 Tool ${toolName} result for channel ${this.channelName}:`, toolResult);
                 
                 // Add tool result to response
                 finalResponse += `\n\n${toolResult}`;
               } catch (toolError) {
-                console.error(`[RTM] ❌ Tool ${toolName} error:`, toolError);
+                console.error(`[RTM] ❌ Tool ${toolName} error in channel ${this.channelName}:`, toolError);
                 finalResponse += `\n\nSorry, there was an issue with ${toolName}.`;
               }
             } else {
@@ -264,20 +266,20 @@ AVAILABLE MODES: chat, video`;
           }
         }
         
-        console.log(`[RTM] 🤖 LLM RESPONSE for RTM CHAT:`, finalResponse);
+        console.log(`[RTM] 🤖 LLM RESPONSE for RTM CHAT in channel ${this.channelName}:`, finalResponse);
 
-        // Save assistant response with CHAT mode (RTM = chat)
-        console.log(`[RTM] 💾 SAVING ASSISTANT RESPONSE WITH MODE: chat`);
+        // Save assistant response with CHAT mode (RTM = chat) - NOW CHANNEL-SPECIFIC
+        console.log(`[RTM] 💾 SAVING ASSISTANT RESPONSE WITH MODE: chat for ${userId} in channel ${this.channelName}`);
         console.log(`[RTM] Response content length: ${finalResponse.length} chars`);
         console.log(`[RTM] Response preview: ${finalResponse.substring(0, 100)}${finalResponse.length > 100 ? '...' : ''}`);
         
-        await saveMessage(appId, userId, {
+        await saveMessage(appId, userId, this.channelName, {
           role: 'assistant',
           content: finalResponse,
           mode: 'chat'
         });
         
-        console.log(`[RTM] SAVED ASSISTANT RESPONSE with mode: chat`);
+        console.log(`[RTM] SAVED ASSISTANT RESPONSE with mode: chat for ${userId} in channel ${this.channelName}`);
         
         // Send response back
         const responsePayload = {
@@ -291,12 +293,12 @@ AVAILABLE MODES: chat, video`;
           channelType: "USER",
         };
         
-        console.log(`[RTM] 📤 SENDING RESPONSE TO ${event.publisher}`);
+        console.log(`[RTM] 📤 SENDING RESPONSE TO ${event.publisher} in channel ${this.channelName}`);
         console.log(`[RTM] Response payload:`, responsePayload);
         
         // Send message to the channel using the channel-specific target
         await this.rtmClient.publish(event.publisher, finalResponse, options);
-        console.log(`[RTM] ✅ RESPONSE SENT TO ${event.publisher}`);
+        console.log(`[RTM] ✅ RESPONSE SENT TO ${event.publisher} in channel ${this.channelName}`);
         
       } catch (error) {
         console.error('[RTM] ❌ ERROR PROCESSING MESSAGE:', error);
@@ -315,11 +317,11 @@ AVAILABLE MODES: chat, video`;
     
     // Other event handlers
     this.rtmClient.addEventListener("presence", (event: any) => {
-      console.log(`[RTM] Presence event:`, event);
+      console.log(`[RTM] Presence event in channel ${this.channelName}:`, event);
     });
     
     this.rtmClient.addEventListener("status", (event: any) => {
-      console.log(`[RTM] Status changed to ${event.state}`);
+      console.log(`[RTM] Status changed to ${event.state} for channel ${this.channelName}`);
     });
   }
   
@@ -336,9 +338,10 @@ AVAILABLE MODES: chat, video`;
       };
       
       await this.rtmClient.publish(this.channelName, JSON.stringify(payload));
+      console.log(`[RTM] Message sent to channel ${this.channelName}`);
       return true;
     } catch (error) {
-      console.error('[RTM] Error sending message:', error);
+      console.error(`[RTM] Error sending message to channel ${this.channelName}:`, error);
       return false;
     }
   }

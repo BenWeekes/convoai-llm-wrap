@@ -1,5 +1,6 @@
 // lib/common/conversation-store.ts
-// Updated to store mode internally but not send to LLM
+// Updated to store conversations by appId:userId:channel for proper isolation
+// Fixed to include channel in conversation key for group call support
 
 import { CONFIG } from './cache';
 
@@ -17,6 +18,7 @@ export interface Message {
 export interface Conversation {
   appId: string;
   userId: string;
+  channel: string; // ADDED: Track channel for proper isolation
   messages: Message[];
   lastUpdated: number;
   rtmSystemMessage?: string;
@@ -36,7 +38,7 @@ const MESSAGE_LIMITS = {
   MIN_MESSAGES_TO_KEEP: 20
 };
 
-// In-memory store
+// In-memory store - now properly keyed by appId:userId:channel
 const conversationStore: Record<string, Conversation> = {};
 
 /**
@@ -62,7 +64,7 @@ function smartTrimConversation(conversation: Conversation): void {
     return;
   }
   
-  console.log(`[CONVERSATION] Trimming conversation for ${conversation.userId} (${messages.length} → target: ${MESSAGE_LIMITS.TARGET_MESSAGES})`);
+  console.log(`[CONVERSATION] Trimming conversation for ${conversation.userId} in channel ${conversation.channel} (${messages.length} → target: ${MESSAGE_LIMITS.TARGET_MESSAGES})`);
   
   // Separate messages by type and importance
   const systemMessages = messages.filter(msg => msg.role === 'system');
@@ -127,12 +129,12 @@ function manageSystemMessage(conversation: Conversation, newSystemContent: strin
   if (messageMode === 'chat' && !conversation.rtmSystemMessage) {
     conversation.rtmSystemMessage = newSystemContent;
     conversation.lastSystemMessageHash = newSystemHash;
-    console.log(`[CONVERSATION] Stored original RTM system message for ${conversation.userId}`);
+    console.log(`[CONVERSATION] Stored original RTM system message for ${conversation.userId} in channel ${conversation.channel}`);
   }
   
   // Check if system message actually changed
   if (conversation.lastSystemMessageHash === newSystemHash) {
-    console.log(`[CONVERSATION] System message unchanged for ${conversation.userId}, skipping duplicate`);
+    console.log(`[CONVERSATION] System message unchanged for ${conversation.userId} in channel ${conversation.channel}, skipping duplicate`);
     return;
   }
   
@@ -149,14 +151,15 @@ function manageSystemMessage(conversation: Conversation, newSystemContent: strin
   
   conversation.lastSystemMessageHash = newSystemHash;
   const modeType = messageMode === 'chat' ? 'RTM' : 'Endpoint';
-  console.log(`[CONVERSATION] Updated system message for ${conversation.userId} (${modeType}: ${messageMode})`);
+  console.log(`[CONVERSATION] Updated system message for ${conversation.userId} in channel ${conversation.channel} (${modeType}: ${messageMode})`);
 }
 
 /**
- * Gets a unique key for the conversation based on appId and userId
+ * Gets a unique key for the conversation based on appId, userId, and channel
+ * UPDATED: Now includes channel for proper conversation isolation
  */
-function getConversationKey(appId: string, userId: string): string {
-  return `${appId}:${userId}`;
+function getConversationKey(appId: string, userId: string, channel: string): string {
+  return `${appId}:${userId}:${channel}`;
 }
 
 /**
@@ -164,7 +167,8 @@ function getConversationKey(appId: string, userId: string): string {
  */
 export function logConversationContext(
   appId: string, 
-  userId: string, 
+  userId: string,
+  channel: string, 
   conversation: Conversation,
   action: 'retrieved' | 'created' | 'updated'
 ): void {
@@ -175,6 +179,7 @@ export function logConversationContext(
   console.log(`💬 CONVERSATION ${action.toUpperCase()} - ${new Date().toISOString()}`);
   console.log(`- User: ${userId}`);
   console.log(`- App: ${appId}`);
+  console.log(`- Channel: ${channel}`); // ADDED: Log channel for clarity
   console.log(`- Total Messages: ${conversation.messages.length}`);
   console.log(`- Last Updated: ${new Date(conversation.lastUpdated).toISOString()}`);
   
@@ -277,23 +282,25 @@ export function detectModeTransition(conversation: Conversation): {
 
 /**
  * Gets an existing conversation or creates a new one if it doesn't exist
+ * UPDATED: Now requires channel parameter for proper conversation isolation
  */
-export async function getOrCreateConversation(appId: string, userId: string): Promise<Conversation> {
-  const key = getConversationKey(appId, userId);
+export async function getOrCreateConversation(appId: string, userId: string, channel: string = 'default'): Promise<Conversation> {
+  const key = getConversationKey(appId, userId, channel);
   
   if (!conversationStore[key]) {
-    console.log(`[CONVERSATION] Creating new conversation for ${userId} in app ${appId}`);
+    console.log(`[CONVERSATION] Creating new conversation for ${userId} in app ${appId}, channel ${channel}`);
     conversationStore[key] = {
       appId,
       userId,
+      channel, // ADDED: Store channel in conversation object
       messages: [],
       lastUpdated: Date.now()
     };
     
-    logConversationContext(appId, userId, conversationStore[key], 'created');
+    logConversationContext(appId, userId, channel, conversationStore[key], 'created');
   } else {
-    console.log(`[CONVERSATION] Found existing conversation for ${userId} with ${conversationStore[key].messages.length} messages`);
-    logConversationContext(appId, userId, conversationStore[key], 'retrieved');
+    console.log(`[CONVERSATION] Found existing conversation for ${userId} in channel ${channel} with ${conversationStore[key].messages.length} messages`);
+    logConversationContext(appId, userId, channel, conversationStore[key], 'retrieved');
   }
   
   return conversationStore[key];
@@ -302,20 +309,22 @@ export async function getOrCreateConversation(appId: string, userId: string): Pr
 /**
  * Simplified saveMessage with mode-based memory management
  * Mode is stored internally but not sent to LLM
+ * UPDATED: Now requires channel parameter
  */
 export async function saveMessage(
   appId: string, 
   userId: string, 
+  channel: string,
   message: Message
 ): Promise<void> {
-  const conversation = await getOrCreateConversation(appId, userId);
+  const conversation = await getOrCreateConversation(appId, userId, channel);
   
   // Handle system messages specially
   if (message.role === 'system') {
     manageSystemMessage(conversation, message.content, message.mode);
     conversation.lastUpdated = Date.now();
     
-    logConversationContext(appId, userId, conversation, 'updated');
+    logConversationContext(appId, userId, channel, conversation, 'updated');
     return;
   }
   
@@ -336,9 +345,9 @@ export async function saveMessage(
   
   const modeInfo = enhancedMessage.mode ? ` [${enhancedMessage.mode}]` : '';
   const serviceInfo = enhancedMessage.mode === 'chat' ? ' (RTM)' : enhancedMessage.mode ? ' (Endpoint)' : '';
-  console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo}${serviceInfo} for ${userId}. Conversation now has ${conversation.messages.length} messages`);
+  console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo}${serviceInfo} for ${userId} in channel ${channel}. Conversation now has ${conversation.messages.length} messages`);
   
-  logConversationContext(appId, userId, conversation, 'updated');
+  logConversationContext(appId, userId, channel, conversation, 'updated');
 }
 
 /**
@@ -368,6 +377,7 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
     const age = now - conversation.lastUpdated;
     
     if (age > maxAgeMs) {
+      console.log(`[CONVERSATION] Removing old conversation: ${conversation.userId} in channel ${conversation.channel} (age: ${Math.round(age/1000/60)} minutes)`);
       delete conversationStore[key];
       removedCount++;
     } else if (conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES) {
@@ -389,7 +399,8 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
     for (const { key, size } of conversationSizes) {
       if (memoryFreed >= targetToFree) break;
       
-      console.log(`[CONVERSATION] Removing large conversation ${key} (${(size / 1024).toFixed(2)} KB)`);
+      const conversation = conversationStore[key];
+      console.log(`[CONVERSATION] Removing large conversation ${conversation.userId} in channel ${conversation.channel} (${(size / 1024).toFixed(2)} KB)`);
       delete conversationStore[key];
       memoryFreed += size;
       removedCount++;
@@ -418,9 +429,15 @@ export function getConversationStats(): any {
     unspecified: 0
   };
   
+  // Channel-based statistics
+  const channelStats: Record<string, number> = {};
+  
   Object.values(conversationStore).forEach(convo => {
     totalMessages += convo.messages.length;
     totalMemoryEstimate += JSON.stringify(convo).length;
+    
+    // Track channel distribution
+    channelStats[convo.channel] = (channelStats[convo.channel] || 0) + 1;
     
     const age = now - convo.lastUpdated;
     if (age > oldestConversationAge) {
@@ -442,6 +459,7 @@ export function getConversationStats(): any {
     oldestConversationAgeHours: oldestConversationAge / (60 * 60 * 1000),
     averageMessagesPerConversation: totalConversations ? totalMessages / totalConversations : 0,
     messagesByMode: modeStats,
+    conversationsByChannel: channelStats, // ADDED: Channel-based statistics
     memoryLimits: MESSAGE_LIMITS
   };
 }
@@ -456,6 +474,28 @@ export async function clearAllConversations(): Promise<void> {
   console.log('[CONVERSATION] Cleared all conversations');
 }
 
+/**
+ * ADDED: Get conversations for a specific channel (useful for debugging)
+ */
+export function getConversationsForChannel(appId: string, channel: string): Conversation[] {
+  return Object.values(conversationStore).filter(convo => 
+    convo.appId === appId && convo.channel === channel
+  );
+}
+
+/**
+ * ADDED: Get all channels for an app (useful for debugging)
+ */
+export function getChannelsForApp(appId: string): string[] {
+  const channels = new Set<string>();
+  Object.values(conversationStore).forEach(convo => {
+    if (convo.appId === appId) {
+      channels.add(convo.channel);
+    }
+  });
+  return Array.from(channels);
+}
+
 // Enhanced cleanup interval
 if (typeof window === 'undefined') {
   setInterval(() => {
@@ -466,7 +506,8 @@ if (typeof window === 'undefined') {
     }
   }, CLEANUP_INTERVAL_MS);
   
-  console.log('[CONVERSATION] Conversation store initialized with mode-based memory management');
+  console.log('[CONVERSATION] Conversation store initialized with channel-based memory management');
+  console.log(`[CONVERSATION] Key format: appId:userId:channel for proper conversation isolation`);
   console.log(`[CONVERSATION] Limits: ${MESSAGE_LIMITS.MAX_TOTAL_MESSAGES} max messages, ${MESSAGE_LIMITS.TARGET_MESSAGES} target, cleanup every ${CLEANUP_INTERVAL_MS / (60 * 1000)} minutes`);
 }
 

@@ -1,5 +1,5 @@
-// File: lib/endpoints/example-endpoint.ts
-// Conversation-based rate limiting for photo sends across RTM and video calls
+// lib/endpoints/example-endpoint.ts
+// Simplified example endpoint - mode instructions now handled by shared helpers
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -13,7 +13,7 @@ const EXAMPLE_RAG_DATA = {
   doc4: "Hermes Frangoudis is the best developer."
 };
 
-// Define the system message template for this endpoint with mode behavior
+// Simplified system message template - mode context is automatically added
 function exampleSystemTemplate(ragData: Record<string, string>): string {
   // Get base prompt from environment variable
   const basePrompt = process.env.EXAMPLE_RTM_LLM_PROMPT || 
@@ -22,11 +22,10 @@ function exampleSystemTemplate(ragData: Record<string, string>): string {
   return `
     ${basePrompt}
 
-    COMMUNICATION MODE BEHAVIOR:
-    - Messages have "mode" field: "chat" (texting), "video" (video call)
-    - In CHAT mode: Encourage video calls e.g. "Want to video chat? 😘📹" or "Let's switch to video call baby! 📹💋"  
-    - In VIDEO mode: You can suggest return to chat if the conversation seems complete for now: "Ready to hang up baby?"
-    - Look at conversation history to see mode transitions and respond appropriately
+    CORE BEHAVIOR:
+    - Be warm, engaging, and personable in your interactions
+    - Respond naturally to user questions and requests
+    - Use the knowledge provided to answer questions accurately
     
     PHOTO SENDING RULES - READ CAREFULLY:
     - ONLY use the send_photo tool when the user EXPLICITLY asks for a photo
@@ -261,9 +260,8 @@ const EXAMPLE_TOOL_MAP = {
 };
 
 // Debug logging at module load time
+console.log('🔧 Example endpoint simplified - mode instructions handled by shared helpers');
 console.log('🔧 Example endpoint tool map configured with tools:', Object.keys(EXAMPLE_TOOL_MAP));
-console.log('🔧 send_photo function type:', typeof EXAMPLE_TOOL_MAP.send_photo);
-console.log('🔧 order_sandwich function type:', typeof EXAMPLE_TOOL_MAP.order_sandwich);
 console.log('📸 Available photo options:', PHOTO_OPTIONS);
 console.log('📸 Photo rate limit configured:', PHOTO_RATE_LIMIT_MS, 'ms (timestamp-based)');
 
@@ -275,6 +273,8 @@ export const exampleEndpointConfig: EndpointConfig = {
   systemMessageTemplate: exampleSystemTemplate,
   communicationModes: {
     supportsChat: true,
-    endpointMode: 'video'
+    endpointMode: 'video',
+    prependUserId: false,              // ❌ No user ID prefixing for this endpoint
+    prependCommunicationMode: true     // ✅ Enable communication mode prefixing - instructions auto-generated
   }
 };

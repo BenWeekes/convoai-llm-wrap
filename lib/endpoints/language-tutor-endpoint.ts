@@ -1,5 +1,6 @@
-// File: lib/endpoints/language-tutor-endpoint.ts
+// lib/endpoints/language-tutor-endpoint.ts
 // Configuration for the language tutor endpoint
+// Clean endpoint - no automatic prefixing or mode context
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -20,8 +21,8 @@ const DEFAULT_TTL = 1; // day
 // Define minimal RAG data (will be ignored as system message comes from messages param)
 const LANGUAGE_TUTOR_RAG_DATA = {};
 
-// Define a minimal system template function that doesn't add any instructions
-// The actual system message will come from the messages parameter
+// Clean system template function that doesn't add any extra instructions
+// No automatic context will be added since no communication modes are configured
 function languageTutorSystemTemplate(ragData: Record<string, string>): string {
   return ``; // Empty string as we'll use the system message from the messages parameter
 }
@@ -233,12 +234,24 @@ const LANGUAGE_TUTOR_TOOL_MAP = {
   set_word_result
 };
 
+// Debug logging
+console.log('🔧 Language tutor endpoint configured with clean system template');
+console.log('📝 No automatic prefixing or mode context - pure language tutoring focus');
+
 // Export the complete endpoint configuration
-// This endpoint doesn't specify communication modes, so it will work exactly as before
-// No RTM chat will be initialized, no mode context will be added to system messages
+// Explicitly disable all automatic prefixing for clean language tutoring experience
 export const languageTutorEndpointConfig: EndpointConfig = {
   ragData: LANGUAGE_TUTOR_RAG_DATA,
   tools: LANGUAGE_TUTOR_TOOLS,
   toolMap: LANGUAGE_TUTOR_TOOL_MAP,
-  systemMessageTemplate: languageTutorSystemTemplate
+  systemMessageTemplate: languageTutorSystemTemplate,
+  communicationModes: {
+    // No chat or endpoint modes supported - pure API-based tutoring
+    supportsChat: false,
+    // No endpoint mode - this is a stateless tutoring service
+    endpointMode: undefined,
+    // Explicitly disable all automatic prefixing for clean messages
+    prependUserId: false,        // ❌ No user ID prefixes - focus on content
+    prependCommunicationMode: false // ❌ No mode prefixes - pure language learning
+  }
 };

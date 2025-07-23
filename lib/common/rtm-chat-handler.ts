@@ -1,7 +1,6 @@
 // lib/common/rtm-chat-handler.ts
 // Shared RTM chat handler that any endpoint can use for seamless voice/chat integration
-// Enhanced with communication mode support
-// FIXED: Store model in session to avoid re-reading from environment
+// Enhanced with communication mode support and channel-based conversation storage
 
 import rtmClientManager from './rtm-client-manager';
 import { getOrCreateConversation, saveMessage } from './conversation-store';
@@ -19,8 +18,9 @@ interface EndpointChatSession {
   rtmClient: any;
   openai: OpenAI;
   environmentPrefix: string;
-  model: string; // ADDED: Store model to avoid re-reading from env
-  baseURL: string; // ADDED: Store baseURL for consistency
+  model: string; // Store model to avoid re-reading from env
+  baseURL: string; // Store baseURL for consistency
+  channel: string; // ADDED: Store the RTM channel for this session
 }
 
 class EndpointChatManager {
@@ -79,7 +79,7 @@ class EndpointChatManager {
       }
 
       console.log(`[RTM-CHAT] Initializing ${endpointName} chat with appId: ${appId}, user: ${fromUser}, channel: ${channel}`);
-      console.log(`[RTM-CHAT] Using model: ${model}, baseURL: ${baseURL}`); // Log the stored values
+      console.log(`[RTM-CHAT] Using model: ${model}, baseURL: ${baseURL}`);
 
       // Create OpenAI client
       const openai = new OpenAI({
@@ -108,22 +108,23 @@ class EndpointChatManager {
         rtmClient,
         openai,
         environmentPrefix: envPrefix,
-        model: model,     // FIXED: Store model value
-        baseURL: baseURL  // ADDED: Store baseURL for consistency
+        model: model,     // Store model value
+        baseURL: baseURL, // Store baseURL for consistency
+        channel: channel  // ADDED: Store channel for conversation isolation
       };
 
       this.activeSessions.set(sessionKey, session);
 
-      // Set up message handler
+      // Set up message handler with channel context
       rtmClientManager.addMessageHandler(
         appId,
         fromUser,
         channel,
-        (event) => this.handleChatMessage(sessionKey, appId, event)
+        (event) => this.handleChatMessage(sessionKey, appId, channel, event)
       );
 
       console.log(`[RTM-CHAT] ${endpointName} chat initialized successfully (supports chat + ${config.communicationModes?.endpointMode || 'unknown'})`);
-      console.log(`[RTM-CHAT] Cached model: ${session.model}, baseURL: ${session.baseURL}`);
+      console.log(`[RTM-CHAT] Cached model: ${session.model}, baseURL: ${session.baseURL}, channel: ${session.channel}`);
       return true;
 
     } catch (error) {
@@ -177,9 +178,10 @@ class EndpointChatManager {
   }
 
   /**
-   * Handle incoming chat message with communication mode awareness
+   * Handle incoming chat message with communication mode awareness and channel-based conversations
+   * UPDATED: Now uses channel-based conversation storage
    */
-  private async handleChatMessage(sessionKey: string, appId: string, event: any): Promise<void> {
+  private async handleChatMessage(sessionKey: string, appId: string, channel: string, event: any): Promise<void> {
     const session = this.activeSessions.get(sessionKey);
     if (!session) {
       console.error(`[RTM-CHAT] No session found for ${sessionKey}`);
@@ -217,13 +219,13 @@ class EndpointChatManager {
         }
       }
 
-      console.log(`[RTM-CHAT] Processing message from ${userId}: ${messageContent}`);
+      console.log(`[RTM-CHAT] Processing message from ${userId} in channel ${channel}: ${messageContent}`);
 
-      // Get or create conversation
-      const conversation = await getOrCreateConversation(appId, userId);
+      // Get or create conversation (NOW CHANNEL-SPECIFIC)
+      const conversation = await getOrCreateConversation(appId, userId, channel);
 
       // Add user message to conversation with CHAT mode (since this is RTM)
-      await saveMessage(appId, userId, {
+      await saveMessage(appId, userId, channel, {
         role: 'user',
         content: messageContent,
         mode: 'chat' // Always chat mode for RTM messages
@@ -265,7 +267,7 @@ AVAILABLE MODES: chat`;
       // Append mode context to system message
       systemMessage += currentModeContext;
 
-      // Prepare messages for LLM
+      // Prepare messages for LLM (NOW USES CHANNEL-SPECIFIC CONVERSATION)
       let messages = [...conversation.messages];
       
       // Insert cached tool responses if needed
@@ -288,13 +290,13 @@ AVAILABLE MODES: chat`;
 
       // Create LLM request using cached model value
       const requestParams: any = {
-        model: session.model,  // FIXED: Use cached model instead of re-reading from env
+        model: session.model,  // Use cached model instead of re-reading from env
         messages,
         tools: session.config.tools,
         tool_choice: 'auto'
       };
 
-      console.log(`[RTM-CHAT] Making LLM request with ${messages.length} messages using model: ${session.model}`);
+      console.log(`[RTM-CHAT] Making LLM request with ${messages.length} messages using model: ${session.model} for channel ${channel}`);
 
       // Handle multi-pass tool calling
       let passCount = 0;
@@ -303,7 +305,7 @@ AVAILABLE MODES: chat`;
 
       while (passCount < maxPasses) {
         passCount++;
-        console.log(`[RTM-CHAT] Pass #${passCount}`);
+        console.log(`[RTM-CHAT] Pass #${passCount} for ${userId} in channel ${channel}`);
 
         const response = await handleModelRequest(session.openai, requestParams);
         finalResponse = response;
@@ -339,10 +341,10 @@ AVAILABLE MODES: chat`;
             continue;
           }
 
-          console.log(`[RTM-CHAT] Executing tool ${callName} for ${userId}`);
+          console.log(`[RTM-CHAT] Executing tool ${callName} for ${userId} in channel ${channel}`);
 
           try {
-            const toolResult = await fn(appId, userId, 'rtm_chat', parsedArgs);
+            const toolResult = await fn(appId, userId, channel, parsedArgs);
             console.log(`[RTM-CHAT] Tool result for ${callName}:`, toolResult);
 
             storeToolResponse(tCall.id, callName, toolResult);
@@ -421,15 +423,15 @@ AVAILABLE MODES: chat`;
       // Use cleaned content for the text response
       const responseText = cleanedContent || finalContent;
 
-      console.log(`[RTM-CHAT] Sending response to ${userId}: ${responseText}`);
+      console.log(`[RTM-CHAT] Sending response to ${userId} in channel ${channel}: ${responseText}`);
 
       // Send simple typing indicator
       await this.sendDirectMessageToUser(session.rtmClient, userId, JSON.stringify({
         type: "typing_start"
       }));
 
-      // Save assistant response to conversation immediately with CHAT mode
-      await saveMessage(appId, userId, {
+      // Save assistant response to conversation immediately with CHAT mode (NOW CHANNEL-SPECIFIC)
+      await saveMessage(appId, userId, channel, {
         role: 'assistant',
         content: responseText,
         mode: 'chat' // Always chat mode for RTM responses
@@ -444,19 +446,19 @@ AVAILABLE MODES: chat`;
       const randomVariance = Math.random() * 300; // 0-1.3 seconds random (reduced from 2s)
       const totalDelay = Math.min(baseDelay + typingDelay + randomVariance, 2000); // Cap at 8 seconds (reduced from 12s)
       
-      console.log(`[RTM-CHAT] Message length: ${responseText.length} chars, delay: ${Math.round(totalDelay)}ms`);
+      console.log(`[RTM-CHAT] Message length: ${responseText.length} chars, delay: ${Math.round(totalDelay)}ms for channel ${channel}`);
 
       // Send actual response after calculated delay (non-blocking)
       setTimeout(async () => {
         try {
           await this.sendDirectMessageToUser(session.rtmClient, userId, responseText);
-          console.log(`[RTM-CHAT] Delayed response sent successfully to ${userId}`);
+          console.log(`[RTM-CHAT] Delayed response sent successfully to ${userId} in channel ${channel}`);
         } catch (error) {
           console.error(`[RTM-CHAT] Error sending delayed response to ${userId}:`, error);
         }
       }, totalDelay);
 
-      console.log(`[RTM-CHAT] Response sent successfully to ${userId}`);
+      console.log(`[RTM-CHAT] Response sent successfully to ${userId} in channel ${channel}`);
 
     } catch (error) {
       console.error('[RTM-CHAT] Error processing chat message:', error);
@@ -495,8 +497,9 @@ AVAILABLE MODES: chat`;
       endpointMode: session.config.communicationModes?.endpointMode || 'none',
       environmentPrefix: session.environmentPrefix,
       hasCustomSystemMessage: !!session.currentSystemMessage,
-      model: session.model,        // ADDED: Show cached model
-      baseURL: session.baseURL     // ADDED: Show cached baseURL
+      model: session.model,
+      baseURL: session.baseURL,
+      channel: session.channel // ADDED: Show channel info
     };
   }
 }
