@@ -163,6 +163,23 @@ function getConversationKey(appId: string, userId: string, channel: string): str
 }
 
 /**
+ * Extract user ID from message content for display purposes
+ */
+function extractUserIdForDisplay(content: string): { userId?: string; cleanContent: string } {
+  // Check for [userId] prefix pattern
+  const match = content.match(/^\[([^\]]+)\]\s*(.*)/);
+  if (match) {
+    return {
+      userId: match[1],
+      cleanContent: match[2]
+    };
+  }
+  return {
+    cleanContent: content
+  };
+}
+
+/**
  * Logs conversation context with mode analysis and memory usage
  */
 export function logConversationContext(
@@ -218,18 +235,32 @@ export function logConversationContext(
   console.log(`  - Tool: ${messageStats.tool}`);
   console.log(`  - Unspecified: ${messageStats.unspecified}`);
   
-  // Show recent message sequence
+  // Show recent message sequence - FIXED FORMAT
   if (conversation.messages.length > 0) {
     console.log(`💬 RECENT MESSAGES (last 3):`);
     const recentMessages = conversation.messages.slice(-3);
     recentMessages.forEach((msg, index) => {
       const actualIndex = conversation.messages.length - 3 + index;
-      const modeInfo = msg.mode ? ` [${msg.mode}]` : '';
-      const serviceInfo = msg.mode === 'chat' ? ' (RTM)' : msg.mode ? ' (Endpoint)' : '';
-      const preview = msg.content ? 
-        (msg.content.length > 50 ? msg.content.substring(0, 50) + '...' : msg.content) : 
-        '[no content]';
-      console.log(`  [${actualIndex}] ${msg.role}${modeInfo}${serviceInfo}: ${preview}`);
+      
+      // Extract user ID from content if present
+      const { userId: extractedUserId, cleanContent } = extractUserIdForDisplay(msg.content || '');
+      
+      // Format the message properly
+      let formattedMessage = '';
+      if (msg.role === 'user' && extractedUserId) {
+        // For user messages with ID prefix, show as: user [userId]: content
+        formattedMessage = `  [${actualIndex}] ${msg.role} [${extractedUserId}]: ${cleanContent}`;
+      } else {
+        // For other messages, show as: role: content
+        formattedMessage = `  [${actualIndex}] ${msg.role}: ${msg.content || '[no content]'}`;
+      }
+      
+      // Truncate long messages
+      if (formattedMessage.length > 80) {
+        formattedMessage = formattedMessage.substring(0, 77) + '...';
+      }
+      
+      console.log(formattedMessage);
     });
   }
   

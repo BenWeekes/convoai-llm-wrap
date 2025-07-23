@@ -1,7 +1,6 @@
 // lib/services/rtm-service.ts
-// Enhanced with mode context and typing indicators
-// RTM always uses mode: 'chat'
-// UPDATED: Now uses channel-based conversation storage
+// Legacy RTM service - kept for backwards compatibility but not actively used
+// Modern endpoints use endpoint-specific RTM configurations
 
 import AgoraRTM from 'rtm-nodejs';
 import { getOrCreateConversation, saveMessage, detectModeTransition } from '../common/conversation-store';
@@ -37,17 +36,22 @@ class RTMService {
     }
     
     try {
-      const { RTM } = AgoraRTM;
-      
       const appId = process.env.RTM_APP_ID;
       const userId = process.env.RTM_FROM_USER;
       const token = process.env.RTM_TOKEN;
       this.channelName = process.env.RTM_CHANNEL || 'default_channel';
       
       if (!appId || !userId) {
-        console.error('[RTM] Missing required configuration');
+        console.log('[RTM] Missing required configuration - this is expected if using modern endpoint-based RTM');
+        console.log('[RTM] Required for legacy RTM: RTM_APP_ID, RTM_FROM_USER');
+        console.log('[RTM] Modern endpoints use: EXAMPLE_RTM_*, GROUPCALL_RTM_* variables instead');
         return false;
       }
+      
+      console.log('[RTM] Initializing legacy RTM service');
+      console.log('[RTM] Note: Consider using endpoint-specific RTM configuration instead');
+      
+      const { RTM } = AgoraRTM;
       
       console.log('[RTM] Creating RTM instance');
       this.rtmClient = new RTM(appId, userId);
@@ -64,7 +68,7 @@ class RTMService {
       await this.rtmClient.login(options);
       console.log(`[RTM] Successfully logged in as ${userId}`);
       
-      // Initialize system message for RTM (only once per user) - NOW CHANNEL-SPECIFIC
+      // Initialize system message for RTM (only once per user)
       await this.initializeRTMSystemMessage(appId, userId, this.channelName);
       
       this.initialized = true;
@@ -77,7 +81,6 @@ class RTMService {
   
   /**
    * Initialize the RTM system message (called once when RTM starts)
-   * UPDATED: Now uses channel-based conversation storage
    */
   private async initializeRTMSystemMessage(appId: string, userId: string, channel: string): Promise<void> {
     try {
@@ -93,7 +96,7 @@ AVAILABLE MODES: chat, video`;
       
       console.log(`[RTM] Initializing system message for ${userId} in channel ${channel}`);
       
-      // Save the system message with chat mode (RTM = chat) - NOW CHANNEL-SPECIFIC
+      // Save the system message with chat mode (RTM = chat)
       await saveMessage(appId, userId, channel, {
         role: 'system',
         content: rtmSystemContent,
@@ -154,7 +157,7 @@ AVAILABLE MODES: chat, video`;
           }
         }
         
-        // LOG RTM MESSAGE PROCESSING - NOW WITH CHANNEL CONTEXT
+        // LOG RTM MESSAGE PROCESSING
         logRTMMessageProcessing({
           userId: event.publisher,
           appId,
@@ -177,14 +180,14 @@ AVAILABLE MODES: chat, video`;
         const model = process.env.RTM_LLM_MODEL || 'gpt-4o-mini';
         const baseURL = process.env.RTM_LLM_BASE_URL || 'https://api.openai.com/v1';
         
-        // Get or create conversation - NOW CHANNEL-SPECIFIC
+        // Get or create conversation
         const conversation = await getOrCreateConversation(appId, userId, this.channelName);
         
         // DETECT MODE TRANSITION - Check if user just came from video
         const modeTransition = detectModeTransition(conversation);
         console.log(`[RTM] Mode transition analysis for channel ${this.channelName}:`, modeTransition);
         
-        // Add user message with CHAT mode (RTM = chat) - NOW CHANNEL-SPECIFIC
+        // Add user message with CHAT mode (RTM = chat)
         await saveMessage(appId, userId, this.channelName, {
           role: 'user',
           content: messageContent,
@@ -199,7 +202,7 @@ AVAILABLE MODES: chat, video`;
           baseURL
         });
         
-        // Get updated conversation - system message is already managed by conversation store - NOW CHANNEL-SPECIFIC
+        // Get updated conversation - system message is already managed by conversation store
         const updatedConversation = await getOrCreateConversation(appId, userId, this.channelName);
         const messages = updatedConversation.messages; // Use existing messages with managed system message
         
@@ -268,7 +271,7 @@ AVAILABLE MODES: chat, video`;
         
         console.log(`[RTM] 🤖 LLM RESPONSE for RTM CHAT in channel ${this.channelName}:`, finalResponse);
 
-        // Save assistant response with CHAT mode (RTM = chat) - NOW CHANNEL-SPECIFIC
+        // Save assistant response with CHAT mode (RTM = chat)
         console.log(`[RTM] 💾 SAVING ASSISTANT RESPONSE WITH MODE: chat for ${userId} in channel ${this.channelName}`);
         console.log(`[RTM] Response content length: ${finalResponse.length} chars`);
         console.log(`[RTM] Response preview: ${finalResponse.substring(0, 100)}${finalResponse.length > 100 ? '...' : ''}`);

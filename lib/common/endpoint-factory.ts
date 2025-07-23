@@ -266,6 +266,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       if (req.method === 'POST') {
         try {
           body = await req.json();
+          console.log("BBDDYY", body);
         } catch (jsonError) {
           console.error('❌ Failed to parse JSON body:', jsonError);
           const errorResponse = { error: 'Invalid JSON in request body' };
@@ -909,7 +910,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
               updatedMessages.push({
                 role: 'tool',
                 name: callName,
-                content: toolResult,
+                content: errorResult,
                 tool_call_id: tCall.id,
               });
             }

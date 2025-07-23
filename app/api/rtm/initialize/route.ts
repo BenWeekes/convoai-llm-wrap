@@ -1,35 +1,42 @@
 // app/api/rtm/initialize/route.ts
 
 import { NextResponse } from 'next/server';
-import RTMService from '../../../../lib/services/rtm-service';
 
 export async function GET() {
-  try {
-    if (RTMService.isInitialized()) {
-      return NextResponse.json({ 
-        success: true, 
-        message: 'RTM service already initialized' 
-      });
+  // This route is kept for backwards compatibility but returns info about the modern setup
+  
+  const endpointStatus = {
+    example: {
+      configured: !!(process.env.EXAMPLE_RTM_APP_ID && process.env.EXAMPLE_RTM_FROM_USER && process.env.EXAMPLE_RTM_CHANNEL),
+      app_id: !!process.env.EXAMPLE_RTM_APP_ID,
+      from_user: !!process.env.EXAMPLE_RTM_FROM_USER,
+      channel: !!process.env.EXAMPLE_RTM_CHANNEL,
+      llm_configured: !!process.env.EXAMPLE_RTM_LLM_API_KEY
+    },
+    groupcall: {
+      configured: !!(process.env.GROUPCALL_RTM_APP_ID && process.env.GROUPCALL_RTM_FROM_USER && process.env.GROUPCALL_RTM_CHANNEL),
+      app_id: !!process.env.GROUPCALL_RTM_APP_ID,
+      from_user: !!process.env.GROUPCALL_RTM_FROM_USER,
+      channel: !!process.env.GROUPCALL_RTM_CHANNEL,
+      llm_configured: !!process.env.GROUPCALL_RTM_LLM_API_KEY
+    },
+    legacy: {
+      configured: !!(process.env.RTM_APP_ID && process.env.RTM_FROM_USER),
+      app_id: !!process.env.RTM_APP_ID,
+      from_user: !!process.env.RTM_FROM_USER,
+      channel: !!process.env.RTM_CHANNEL
     }
-    
-    const success = await RTMService.initialize();
-    
-    if (success) {
-      return NextResponse.json({ 
-        success: true, 
-        message: 'RTM service initialized successfully' 
-      });
-    } else {
-      return NextResponse.json({ 
-        success: false, 
-        message: 'RTM service initialization failed' 
-      }, { status: 500 });
-    }
-  } catch (error) {
-    console.error('Error initializing RTM service:', error);
-    return NextResponse.json({ 
-      success: false, 
-      error: 'Internal server error' 
-    }, { status: 500 });
-  }
+  };
+
+  console.log('[RTM] Endpoint RTM Configuration Status:', endpointStatus);
+
+  return NextResponse.json({ 
+    success: true, 
+    message: 'Using modern endpoint-based RTM system',
+    info: 'RTM is initialized per-endpoint when first accessed',
+    endpoints: endpointStatus,
+    recommendation: endpointStatus.legacy.configured ? 
+      'Legacy RTM variables detected but not used' : 
+      'No legacy RTM configuration (this is expected)'
+  });
 }
