@@ -1,6 +1,6 @@
 // lib/common/endpoint-factory.ts
 // Factory function to create standardized endpoint handlers
-// Updated to use channel-based conversation storage for proper isolation
+// Updated with proper logging system
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
@@ -13,6 +13,7 @@ import { getOrCreateConversation, saveMessage } from './conversation-store';
 import rtmClientManager, { RTMClientParams } from './rtm-client-manager';
 import endpointChatManager from './rtm-chat-handler';
 import { buildEnhancedSystemMessage } from './system-prompt-helpers';
+import { endpointLogger as logger, toolLogger } from './logger';
 
 /**
  * Helper function to determine if user ID prefixing is enabled for this endpoint
@@ -49,42 +50,43 @@ async function executeToolCall(
   agent_rtm_channel: string,
   endpointMode?: string
 ): Promise<void> {
-  console.log(`🚀 EXECUTING TOOL CALL - all conditions met`);
+  logger.debug(`Executing tool call - all conditions met`);
   
   const callName = accumulatedToolCall.function.name;
   const callArgsStr = accumulatedToolCall.function.arguments || "{}";
   const fn = config.toolMap[callName];
   
-  console.log(`🔧 TOOL EXECUTION DEBUG:`);
-  console.log(`- Tool name: ${callName}`);
-  console.log(`- Args string: ${callArgsStr}`);
-  console.log(`- Function exists: ${!!fn}`);
-  console.log(`- Available tools:`, Object.keys(config.toolMap));
+  toolLogger.debug(`Tool execution`, {
+    name: callName,
+    argsString: callArgsStr,
+    functionExists: !!fn,
+    availableTools: Object.keys(config.toolMap)
+  });
   
   if (!fn) {
-    console.error(`❌ Unknown tool name: ${callName}`);
+    toolLogger.error(`Unknown tool name`, { toolName: callName });
     return;
   }
   
   let parsedArgs: any = {};
   try {
     parsedArgs = safeJSONParse(callArgsStr);
-    console.log(`- Parsed args:`, parsedArgs);
+    toolLogger.trace(`Parsed tool args`, parsedArgs);
   } catch (err) {
-    console.error("❌ Failed to parse tool call arguments:", err);
+    toolLogger.error("Failed to parse tool call arguments", err);
     return;
   }
   
-  console.log(`🚀 Calling ${callName} for ${userId} in ${channel}`);
+  toolLogger.info(`Calling tool`, { name: callName, userId, channel });
   
   try {
     // Execute the tool function
     const toolResult = await fn(appId, userId, channel, parsedArgs);
-    console.log(`✅ Tool result for ${callName}:`, toolResult);
+    toolLogger.debug(`Tool result`, { name: callName, result: toolResult });
 
     // Store the tool response in the cache
     storeToolResponse(accumulatedToolCall.id, callName, toolResult);
-    console.log(`💾 Cached tool response for call ID: ${accumulatedToolCall.id}`);
+    toolLogger.trace(`Cached tool response`, { callId: accumulatedToolCall.id.substring(0, 8) });
     
     // Store tool execution in the response log
     completeResponse.push({
@@ -131,7 +133,9 @@ async function executeToolCall(
       finalStreamParams.tool_choice = "auto";
     }
 
-    console.log(`🔄 Making final stream request with ${cleanedMessages.length} cleaned messages`);
+    logger.debug(`Making final stream request after tool execution`, {
+      messageCount: cleanedMessages.length
+    });
     
     // LOG THE FINAL REQUEST AFTER TOOL EXECUTION
     logLLMRequest(finalStreamParams, {
@@ -182,7 +186,7 @@ async function executeToolCall(
             
             // Send command to RTM
             if (rtmClient && enable_rtm && agent_rtm_channel) {
-              console.log(`[RTM] Extracted command from final response: ${commandBuffer}`);
+              logger.trace(`Extracted command from final response`, { command: commandBuffer });
               await rtmClientManager.sendMessageToChannel(
                 rtmClient,
                 agent_rtm_channel,
@@ -216,7 +220,7 @@ async function executeToolCall(
       }
     }
   } catch (toolError) {
-    console.error(`❌ Error executing tool ${callName}:`, toolError);
+    toolLogger.error(`Error executing tool`, { name: callName, error: toolError });
     const errorResult = `Error executing ${callName}: ${toolError instanceof Error ? toolError.message : 'Unknown error'}`;
     storeToolResponse(accumulatedToolCall.id, callName, errorResult);
   }
@@ -247,8 +251,6 @@ function endStream(
 
 /**
  * Creates an endpoint handler with consistent error handling and LLM interaction patterns
- * Uses shared system prompt helpers for automatic context generation based on configuration
- * UPDATED: Uses channel-based conversation storage for proper isolation
  */
 export function createEndpointHandler(config: EndpointConfig, endpointName?: string) {
   return async function endpointHandler(req: RequestWithJson) {
@@ -266,16 +268,16 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       if (req.method === 'POST') {
         try {
           body = await req.json();
-          console.log("BBDDYY", body);
+          logger.trace("Request body received", body);
         } catch (jsonError) {
-          console.error('❌ Failed to parse JSON body:', jsonError);
+          logger.error('Failed to parse JSON body', jsonError);
           const errorResponse = { error: 'Invalid JSON in request body' };
           logFullResponse("ERROR-400", errorResponse);
           return NextResponse.json(errorResponse, { status: 400 });
         }
       } else {
         // GET request - no body expected, use empty object
-        console.log('📝 GET request received - no body to parse');
+        logger.debug('GET request received - no body to parse');
         body = {};
       }
 
@@ -285,7 +287,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         baseURL = 'https://api.openai.com/v1',
         apiKey = process.env.OPENAI_API_KEY,
         stream = true,
-        channel = 'default', // UPDATED: Default channel instead of 'ccc'
+        channel = 'default',
         userId = '111',
         appId = '',
         simplifiedTools = false,
@@ -303,10 +305,10 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       const shouldPrependMode = shouldPrependCommunicationMode(config);
       
       if (shouldPrepend) {
-        console.log(`📝 USER ID PREPENDING ENABLED: User messages will be prefixed with [${userId}]`);
+        logger.info(`User ID prepending enabled`, { userId });
       }
       if (shouldPrependMode) {
-        console.log(`📝 COMMUNICATION MODE PREPENDING ENABLED: User messages will be prefixed with mode`);
+        logger.info(`Communication mode prepending enabled`);
       }
 
       // C) Initialize RTM chat for this endpoint (only if endpointName is provided)
@@ -314,24 +316,25 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         try {
           await endpointChatManager.initializeEndpointChat(endpointName, config);
         } catch (chatInitError) {
-          console.log(`[ENDPOINT] RTM chat initialization failed for ${endpointName}:`, chatInitError);
+          logger.warn(`RTM chat initialization failed`, { endpoint: endpointName, error: chatInitError });
         }
 
         // D) Check for custom system message and update chat handler BEFORE processing
         if (originalMessages && Array.isArray(originalMessages) && originalMessages.length > 0 && 
             originalMessages[0].role === 'system' && appId) {
-          console.log(`[ENDPOINT] Custom system message detected for ${endpointName}, updating chat handler`);
+          logger.debug(`Custom system message detected, updating chat handler`, { endpoint: endpointName });
           endpointChatManager.updateSystemMessage(endpointName, appId, originalMessages[0].content);
         }
       }
 
       // Log communication mode configuration
-      console.log(`[ENDPOINT] Communication mode config for ${endpointName}:`, {
+      logger.debug(`Communication mode config`, {
+        endpoint: endpointName,
         supportsChat: config.communicationModes?.supportsChat,
         endpointMode: config.communicationModes?.endpointMode,
         prependUserId: shouldPrepend,
         prependCommunicationMode: shouldPrependMode,
-        channel // ADDED: Log the channel being used
+        channel
       });
 
       // Gather RTM parameters
@@ -347,14 +350,22 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       const rtmClient = enable_rtm ? 
         await rtmClientManager.getOrCreateClient(rtmParams) : null;
 
-      console.log('Request body:');
-      console.dir(body, { depth: null, colors: true });
+      logger.trace('Request details', {
+        method: req.method,
+        hasMessages: !!originalMessages,
+        appId,
+        userId,
+        channel
+      });
       
       logCacheState();
       
       // Skip validation for GET requests used for initialization
       if (req.method === 'GET') {
-        console.log(`[ENDPOINT] GET request for ${endpointName || 'unknown'} - RTM chat initialization complete`);
+        logger.info(`GET request for endpoint initialization`, {
+          endpoint: endpointName || 'unknown',
+          rtmChatActive: endpointName ? endpointChatManager.isEndpointChatActive(endpointName) : false
+        });
         return NextResponse.json({ 
           message: 'Endpoint initialized successfully',
           rtm_chat_active: endpointName ? endpointChatManager.isEndpointChatActive(endpointName) : false,
@@ -364,7 +375,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           },
           prepend_user_id: shouldPrepend,
           prepend_communication_mode: shouldPrependMode,
-          channel_based_history: true // ADDED: Indicate channel-based conversation support
+          channel_based_history: true
         });
       }
       
@@ -401,7 +412,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         };
         requestMessages = originalMessages.slice(1);
         
-        console.log(`[ENDPOINT] Enhanced custom system message with automatic context`);
+        logger.debug(`Enhanced custom system message with automatic context`);
       } else {
         // Create enhanced system message from endpoint template
         const baseSystemMessage = config.systemMessageTemplate(config.ragData);
@@ -413,7 +424,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         };
         requestMessages = originalMessages;
         
-        console.log(`[ENDPOINT] Generated enhanced system message from template with automatic context`);
+        logger.debug(`Generated enhanced system message from template with automatic context`);
       }
       
       // Add mode information to request messages
@@ -425,9 +436,13 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           }))
         : requestMessages;
       
-      // Get existing conversation to preserve history (NOW CHANNEL-SPECIFIC)
+      // Get existing conversation to preserve history
       const existingConversation = await getOrCreateConversation(appId, userId, channel);
-      console.log(`[ENDPOINT] Found existing conversation for ${userId} in channel ${channel} with ${existingConversation.messages.length} messages`);
+      logger.debug(`Found existing conversation`, {
+        userId,
+        channel,
+        messageCount: existingConversation.messages.length
+      });
       
       // Process request messages and insert cached tool responses if needed
       const processedRequestMessages = insertCachedToolResponses(processedMessages, {
@@ -436,17 +451,16 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         prependCommunicationMode: shouldPrependMode
       });
       
-      // SIMPLIFIED SYSTEM MESSAGE MANAGEMENT - Let conversation store handle it based on mode
-      console.log(`[ENDPOINT] Managing enhanced system message for ${userId} in channel ${channel}`);
+      // Save the enhanced system message
+      logger.debug(`Managing enhanced system message`, { userId, channel });
       
-      // Save the enhanced system message (NOW CHANNEL-SPECIFIC)
       await saveMessage(appId, userId, channel, {
         role: 'system',
         content: systemMessage.content,
         mode: endpointMode
       });
       
-      // Prepare final messages - get the managed conversation (NOW CHANNEL-SPECIFIC)
+      // Prepare final messages - get the managed conversation
       const managedConversation = await getOrCreateConversation(appId, userId, channel);
       let finalMessages: any[];
       
@@ -461,9 +475,13 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       
       finalMessages = [...existingMessagesWithoutCurrent, ...processedRequestMessages];
       
-      console.log(`[ENDPOINT] Final message count: ${finalMessages.length} (${existingMessagesWithoutCurrent.length} existing + ${processedRequestMessages.length} new)`);
+      logger.debug(`Final message preparation`, {
+        total: finalMessages.length,
+        existing: existingMessagesWithoutCurrent.length,
+        new: processedRequestMessages.length
+      });
 
-      // Save user messages to conversation with mode information (NOW CHANNEL-SPECIFIC)
+      // Save user messages to conversation with mode information
       for (const message of processedRequestMessages) {
         if (message.role === 'user') {
           // LOG MODE TRANSITION
@@ -502,9 +520,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         commonRequestParams.tool_choice = "auto";
       }
 
-      console.info('🔄 Request stream parameter:', stream);
-      console.info('🔧 Common request params (stream=false for tool detection):');
-      console.dir(commonRequestParams, { depth: null, colors: true });
+      logger.info('Request stream parameter', { stream });
+      logger.trace('Common request params', commonRequestParams);
 
       // G) Handle the request based on streaming preference
       if (stream) {
@@ -513,12 +530,12 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           const streamParams = { ...commonRequestParams, messages: cleanedFinalMessages, stream: true };
           
           // LOG THE REQUEST TO LLM - STREAMING
-          console.log(`\n🚀 ABOUT TO MAKE STREAMING LLM REQUEST`);
+          logger.debug(`Making streaming LLM request`);
           if (shouldPrepend) {
-            console.log(`📝 User ID prepending enabled: Messages from [${userId}] will be visible to LLM`);
+            logger.debug(`User ID prepending enabled`, { userId });
           }
           if (shouldPrependMode) {
-            console.log(`📝 Communication mode prepending enabled: Messages will show mode prefixes`);
+            logger.debug(`Communication mode prepending enabled`);
           }
           
           logLLMRequest(streamParams, {
@@ -573,7 +590,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
 
                   // Handle tool calls accumulation
                   if (delta?.tool_calls) {
-                    console.log(`🔧 TOOL CALL DETECTED:`, delta.tool_calls);
+                    toolLogger.debug(`Tool call detected in stream`, delta.tool_calls);
                     
                     for (const tCall of delta.tool_calls) {
                       if (!accumulatedToolCall || (tCall.function?.name && accumulatedToolCall.function?.name && tCall.function.name !== accumulatedToolCall.function.name)) {
@@ -637,7 +654,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                         inCommand = false;
                         
                         if (rtmClient && enable_rtm && agent_rtm_channel) {
-                          console.log(`[RTM] Extracted command: ${commandBuffer}`);
+                          logger.trace(`Extracted command`, { command: commandBuffer });
                           await rtmClientManager.sendMessageToChannel(
                             rtmClient,
                             agent_rtm_channel,
@@ -676,10 +693,10 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
 
                   // Process finish_reason and check for accumulated tool calls
                   if (chunk?.finish_reason && !toolExecuted) {
-                    console.log(`🏁 FINISH REASON DETECTED: ${chunk.finish_reason}`);
+                    logger.debug(`Finish reason detected`, { reason: chunk.finish_reason });
                     
                     if (accumulatedToolCall && accumulatedToolCall.function && accumulatedToolCall.function.name) {
-                      console.log(`🎯 EXECUTING ACCUMULATED TOOL CALL`);
+                      logger.debug(`Executing accumulated tool call`);
                       toolExecuted = true;
                       
                       await executeToolCall(
@@ -706,11 +723,14 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                     } else {
                       toolExecuted = true;
                       
-                      // Save assistant response to conversation with mode (NOW CHANNEL-SPECIFIC)
+                      // Save assistant response to conversation with mode
                       if (accumulatedContent.trim()) {
                         const cleanedContent = cleanAssistantResponse(accumulatedContent.trim());
                         
-                        console.log(`💾 SAVING ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'} in channel ${channel}`);
+                        logger.debug(`Saving assistant response`, {
+                          mode: endpointMode || 'none',
+                          channel
+                        });
                         
                         await saveMessage(appId, userId, channel, {
                           role: 'assistant',
@@ -722,7 +742,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                       // Process any pending commands
                       if (inCommand && commandBuffer.length > 0) {
                         if (rtmClient && enable_rtm && agent_rtm_channel) {
-                          console.log(`[RTM] Extracted final command: ${commandBuffer}`);
+                          logger.trace(`Extracted final command`, { command: commandBuffer });
                           await rtmClientManager.sendMessageToChannel(
                             rtmClient,
                             agent_rtm_channel,
@@ -739,7 +759,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                 }
                 
                 // End of stream reached without finish_reason
-                console.log(`🏁 END OF STREAM - no finish_reason detected`);
+                logger.debug(`End of stream - no finish_reason detected`);
                 
                 if (accumulatedContent.trim()) {
                   const cleanedContent = cleanAssistantResponse(accumulatedContent.trim());
@@ -753,7 +773,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                 
                 if (inCommand && commandBuffer.length > 0) {
                   if (rtmClient && enable_rtm && agent_rtm_channel) {
-                    console.log(`[RTM] Extracted final command: ${commandBuffer}`);
+                    logger.trace(`Extracted final command`, { command: commandBuffer });
                     await rtmClientManager.sendMessageToChannel(
                       rtmClient,
                       agent_rtm_channel,
@@ -766,7 +786,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                 endStream(controller, encoder, completeResponse, "STREAM WITHOUT TOOL", controllerClosed);
                 
               } catch (error) {
-                console.error("❌ OpenAI streaming error:", error);
+                logger.error("OpenAI streaming error", error);
                 if (!controllerClosed.value) {
                   try {
                     const errorMessage = error instanceof Error ? error.message : "Unknown streaming error";
@@ -778,7 +798,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                     controllerClosed.value = true;
                     logFullResponse("STREAM ERROR", completeResponse);
                   } catch (controllerErr) {
-                    console.error("❌ Error while sending error to controller:", controllerErr);
+                    logger.error("Error while sending error to controller", controllerErr);
                   }
                 }
               }
@@ -795,7 +815,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           
           return response;
         } catch (error) {
-          console.error("❌ Stream setup error:", error);
+          logger.error("Stream setup error", error);
           const errorMessage = error instanceof Error ? error.message : "Unknown streaming setup error";
           const errorResponse = { error: errorMessage };
           
@@ -816,7 +836,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         // Multi-pass logic
         while (passCount < maxPasses) {
           passCount++;
-          console.log(`[Non-Stream] ---- PASS #${passCount} ----`);
+          logger.debug(`Non-stream pass`, { pass: passCount });
 
           logLLMRequest({
             ...commonRequestParams,
@@ -846,7 +866,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
 
           const firstChoice = passResponse?.choices?.[0];
           if (!firstChoice) {
-            console.log('[Non-Stream] No choices returned; stopping.');
+            logger.debug('No choices returned; stopping.');
             break;
           }
 
@@ -866,8 +886,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
 
             const fn = config.toolMap[callName];
             if (!fn) {
-              console.error('[Non-Stream] ❌ Unknown tool name:', callName);
-              console.log('[Non-Stream] Available tools:', Object.keys(config.toolMap));
+              toolLogger.error('Unknown tool name', { name: callName, available: Object.keys(config.toolMap) });
               continue;
             }
             
@@ -875,15 +894,15 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
             try {
               parsedArgs = safeJSONParse(tCall.function?.arguments || '{}');
             } catch (err) {
-              console.error('[Non-Stream] ❌ Could not parse tool arguments:', err);
+              toolLogger.error('Could not parse tool arguments', err);
               continue;
             }
 
-            console.log(`[Non-Stream] 🚀 Calling ${callName} for ${userId} in ${channel}`);
+            toolLogger.info(`Calling tool`, { name: callName, userId, channel });
 
             try {
               const toolResult = await fn(appId, userId, channel, parsedArgs);
-              console.log(`[Non-Stream] ✅ Tool result for ${callName}:`, toolResult);
+              toolLogger.debug(`Tool result`, { name: callName, result: toolResult });
               
               storeToolResponse(tCall.id, callName, toolResult);
 
@@ -899,7 +918,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                 tool_call_id: tCall.id,
               });
             } catch (toolError) {
-              console.error(`[Non-Stream] ❌ Error executing tool ${callName}:`, toolError);
+              toolLogger.error(`Error executing tool`, { name: callName, error: toolError });
               const errorResult = `Error executing ${callName}: ${toolError instanceof Error ? toolError.message : 'Unknown error'}`;
               
               updatedMessages.push({
@@ -921,11 +940,14 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           return NextResponse.json({ error: 'No LLM response.' }, { status: 500 });
         }
 
-        // Save assistant response to conversation with mode (NOW CHANNEL-SPECIFIC)
+        // Save assistant response to conversation with mode
         if (accumulatedText.trim()) {
           const cleanedText = cleanAssistantResponse(accumulatedText.trim());
           
-          console.log(`💾 SAVING NON-STREAMING ASSISTANT RESPONSE WITH MODE: ${endpointMode || 'none'} in channel ${channel}`);
+          logger.debug(`Saving non-streaming assistant response`, {
+            mode: endpointMode || 'none',
+            channel
+          });
           
           await saveMessage(appId, userId, channel, {
             role: 'assistant',
@@ -967,7 +989,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           }
           
           if (commands.length > 0) {
-            console.log(`[RTM] Extracted ${commands.length} commands from non-streaming response`);
+            logger.debug(`Extracted commands from non-streaming response`, { count: commands.length });
             for (const cmd of commands) {
               await rtmClientManager.sendMessageToChannel(
                 rtmClient,
@@ -994,7 +1016,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         });
       }
     } catch (error: unknown) {
-      console.error("❌ Chat Completions Error:", error);
+      logger.error("Chat Completions Error", error);
       const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
       const errorResponse = { error: errorMessage };
       

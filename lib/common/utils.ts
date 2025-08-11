@@ -1,8 +1,11 @@
 // File: lib/common/utils.ts
-// Updated to remove all Llama-specific functions and special casing
+// Updated with proper logging system
 
 import OpenAI from 'openai';
 import { CONFIG } from './cache';
+import { llmLogger, createLogger } from './logger';
+
+const utilLogger = createLogger('UTILS');
 
 /**
  * Safe JSON parsing with error recovery
@@ -17,7 +20,7 @@ export function safeJSONParse(jsonStr: string): any {
       try {
         return JSON.parse(candidate);
       } catch (err2) {
-        console.error("Safe JSON parse recovery failed:", err2);
+        utilLogger.error("Safe JSON parse recovery failed", err2);
         throw err2;
       }
     }
@@ -55,7 +58,7 @@ export function extractCommands(text: string): { extractedCommands: string[], cl
     cleanedText = text.replace(pattern, '');
     
     // Log the extracted commands
-    console.log(`Extracted ${matches.length} commands from text:`, matches);
+    utilLogger.debug(`Extracted commands from text`, { count: matches.length, commands: matches });
   }
   
   return { extractedCommands, cleanedText };
@@ -68,14 +71,11 @@ export function logFullResponse(type: string, data: any): void {
   // Skip detailed logging if disabled
   if (!CONFIG.enableDetailedResponseLogging) {
     // Log a minimal message instead
-    console.log(`Response sent: ${type} (detailed logging disabled)`);
+    utilLogger.trace(`Response sent: ${type}`);
     return;
   }
 
-  const separator = "=".repeat(80);
-  console.log(separator);
-  console.log(`📤 RESPONSE TO CALLER (${type}) 📤`);
-  console.log(separator);
+  utilLogger.debug(`📤 RESPONSE TO CALLER (${type})`, { type });
   
   // Extract and log tool-related items first if present
   if (Array.isArray(data)) {
@@ -86,48 +86,20 @@ export function logFullResponse(type: string, data: any): void {
     );
     
     if (toolItems.length > 0) {
-      console.log(`\n🔧 TOOL-RELATED RESPONSES (${toolItems.length} items):`);
-      for (const toolItem of toolItems) {
-        console.dir(toolItem, { depth: null, colors: true });
-      }
-      console.log(separator);
+      utilLogger.debug(`Tool-related responses`, { count: toolItems.length, items: toolItems });
     }
   }
   
   // Then log the complete response
-  console.log("\n📋 COMPLETE RESPONSE:");
-  
   if (Array.isArray(data)) {
-    console.log(`Array with ${data.length} items:`);
-    
-    if (data.length > 0) {
-      // For large arrays, show a subset with indication of omitted items
-      if (data.length > 20) {
-        // Show first 5 items
-        for (let i = 0; i < 5 && i < data.length; i++) {
-          console.dir(data[i], { depth: null, colors: true });
-        }
-        
-        console.log(`\n... ${data.length - 10} items omitted for brevity ...\n`);
-        
-        // Show last 5 items
-        for (let i = Math.max(5, data.length - 5); i < data.length; i++) {
-          console.dir(data[i], { depth: null, colors: true });
-        }
-      } else {
-        // For smaller arrays, show all items in order
-        for (let i = 0; i < data.length; i++) {
-          console.dir(data[i], { depth: null, colors: true });
-        }
-      }
-    } else {
-      console.log("Empty array");
-    }
+    utilLogger.debug(`Complete response array`, { 
+      itemCount: data.length,
+      preview: data.length > 20 ? 'truncated' : 'full',
+      items: data.length > 20 ? [...data.slice(0, 5), '...', ...data.slice(-5)] : data
+    });
   } else {
-    console.dir(data, { depth: null, colors: true });
+    utilLogger.debug(`Complete response`, data);
   }
-  
-  console.log(separator);
 }
 
 /**
@@ -135,7 +107,13 @@ export function logFullResponse(type: string, data: any): void {
  */
 export function validateToken(authHeader: string | null, expectedToken: string): boolean {
   const token = (authHeader || '').replace('Bearer ', '');
-  return token === expectedToken;
+  const isValid = token === expectedToken;
+  
+  if (!isValid) {
+    utilLogger.warn('Invalid token attempted');
+  }
+  
+  return isValid;
 }
 
 // ============================================================================
@@ -154,58 +132,51 @@ export function logLLMRequest(requestParams: any, context: {
 }): void {
   if (!CONFIG.enableLLMRequestLogging) return;
 
-  const separator = "🤖".repeat(40);
-  console.log(separator);
-  console.log(`🤖 LLM REQUEST DEBUG - ${new Date().toISOString()}`);
-  console.log(separator);
-  
-  console.log(`📋 REQUEST CONTEXT:`);
-  console.log(`- User: ${context.userId}`);
-  console.log(`- App: ${context.appId}`);
-  console.log(`- Channel: ${context.channel}`);
-  console.log(`- Endpoint Mode: ${context.endpointMode || 'not specified'}`);
-  console.log(`- Conversation Length: ${context.conversationLength} messages`);
-  console.log(`- Model: ${requestParams.model}`);
-  console.log(`- Stream: ${requestParams.stream}`);
-  console.log(`- Tools Available: ${requestParams.tools ? requestParams.tools.length : 0}`);
-  
-  console.log(`\n💬 MESSAGES BEING SENT TO LLM (${requestParams.messages.length} total):`);
-  requestParams.messages.forEach((msg: any, index: number) => {
-    const truncatedContent = msg.content ? 
-      (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content) : 
-      '[no content]';
-    
-    if (msg.role === 'system') {
-      console.log(`[${index}] 🎯 SYSTEM:`);
-      console.log(`    ${truncatedContent}`);
-    } else if (msg.role === 'user') {
-      console.log(`[${index}] 👤 USER: ${truncatedContent}`);
-    } else if (msg.role === 'assistant') {
-      if (msg.tool_calls) {
-        console.log(`[${index}] 🤖 ASSISTANT: [${msg.tool_calls.length} tool calls]`);
-      } else {
-        console.log(`[${index}] 🤖 ASSISTANT: ${truncatedContent}`);
-      }
-    } else if (msg.role === 'tool') {
-      console.log(`[${index}] 🔧 TOOL (${msg.name || 'unknown'}): ${truncatedContent}`);
+  llmLogger.debug('LLM Request', {
+    context: {
+      userId: context.userId,
+      appId: context.appId,
+      channel: context.channel,
+      endpointMode: context.endpointMode || 'not specified',
+      conversationLength: context.conversationLength
+    },
+    request: {
+      model: requestParams.model,
+      stream: requestParams.stream,
+      toolCount: requestParams.tools ? requestParams.tools.length : 0,
+      messageCount: requestParams.messages.length
     }
   });
+  
+  // Log message summary if trace level
+  if (requestParams.messages) {
+    const messageSummary = requestParams.messages.map((msg: any, index: number) => {
+      const truncatedContent = msg.content ? 
+        (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content) : 
+        '[no content]';
+      
+      return {
+        index,
+        role: msg.role,
+        contentLength: msg.content?.length || 0,
+        hasToolCalls: !!msg.tool_calls,
+        preview: truncatedContent.substring(0, 50)
+      };
+    });
+    
+    llmLogger.trace('Message details', messageSummary);
+  }
   
   // Highlight system message mode context
   const systemMsg = requestParams.messages.find((m: any) => m.role === 'system');
   if (systemMsg && systemMsg.content.includes('CURRENT COMMUNICATION MODE')) {
-    console.log(`\n🎯 COMMUNICATION MODE CONTEXT IN SYSTEM MESSAGE:`);
     const modeLines = systemMsg.content.split('\n').filter((line: string) => 
       line.includes('CURRENT COMMUNICATION MODE') || 
-      line.includes('AVAILABLE MODES') ||
-      line.includes('VIDEO') ||
-      line.includes('VOICE') ||
-      line.includes('CHAT')
-    );
-    modeLines.forEach((line: string) => console.log(`    ${line.trim()}`));
+      line.includes('AVAILABLE MODES')
+    ).map((line: string) => line.trim());
+    
+    llmLogger.debug('Communication mode context in system message', modeLines);
   }
-  
-  console.log(separator);
 }
 
 /**
@@ -220,50 +191,45 @@ export function logLLMResponse(response: any, context: {
 }): void {
   if (!CONFIG.enableLLMResponseLogging) return;
 
-  const separator = "🎭".repeat(40);
-  console.log(separator);
-  console.log(`🎭 LLM RESPONSE DEBUG - ${new Date().toISOString()}`);
-  console.log(separator);
-  
-  console.log(`📋 RESPONSE CONTEXT:`);
-  console.log(`- User: ${context.userId}`);
-  console.log(`- App: ${context.appId}`);
-  console.log(`- Channel: ${context.channel}`);
-  console.log(`- Endpoint Mode: ${context.endpointMode || 'not specified'}`);
-  console.log(`- Request Type: ${context.requestType}`);
-  
   if (context.requestType === 'streaming') {
-    console.log(`\n🌊 STREAMING RESPONSE - see individual chunk logs below`);
+    llmLogger.debug('LLM Streaming Response Started', context);
   } else {
     // Non-streaming response
     const choice = response?.choices?.[0];
     if (choice) {
-      console.log(`\n🤖 LLM COMPLETE RESPONSE:`);
-      console.log(`- Finish Reason: ${choice.finish_reason}`);
+      const responseData: any = {
+        context,
+        finishReason: choice.finish_reason,
+        hasContent: !!choice.message?.content,
+        hasToolCalls: !!choice.message?.tool_calls
+      };
       
       if (choice.message?.content) {
-        console.log(`- Content Length: ${choice.message.content.length} chars`);
-        console.log(`- Content: ${choice.message.content}`);
+        responseData.contentLength = choice.message.content.length;
         
         // Analyze content for mode-related keywords
         const content = choice.message.content.toLowerCase();
         const modeKeywords = ['video', 'call', 'chat', 'hang up', 'switch', 'text'];
         const foundKeywords = modeKeywords.filter(keyword => content.includes(keyword));
         if (foundKeywords.length > 0) {
-          console.log(`- Mode-Related Keywords Found: ${foundKeywords.join(', ')}`);
+          responseData.modeKeywords = foundKeywords;
         }
       }
       
       if (choice.message?.tool_calls) {
-        console.log(`- Tool Calls: ${choice.message.tool_calls.length}`);
-        choice.message.tool_calls.forEach((call: any, index: number) => {
-          console.log(`  [${index}] ${call.function?.name}: ${call.function?.arguments}`);
-        });
+        responseData.toolCalls = choice.message.tool_calls.map((call: any) => ({
+          name: call.function?.name,
+          hasArgs: !!call.function?.arguments
+        }));
+      }
+      
+      llmLogger.debug('LLM Response Complete', responseData);
+      
+      if (choice.message?.content) {
+        llmLogger.trace('Response content', choice.message.content);
       }
     }
   }
-  
-  console.log(separator);
 }
 
 /**
@@ -278,37 +244,42 @@ export function logStreamingChunk(chunk: any, context: {
 }): void {
   if (!CONFIG.enableStreamingChunkLogging) return;
 
-  const prefix = `🌊 CHUNK[${context.chunkIndex}]`;
+  const chunkData: any = {
+    userId: context.userId,
+    index: context.chunkIndex
+  };
   
   if (context.hasToolCalls) {
-    console.log(`${prefix} 🔧 TOOL_CALLS for ${context.userId}`);
     const delta = chunk.choices?.[0]?.delta;
     if (delta?.tool_calls) {
-      delta.tool_calls.forEach((call: any, i: number) => {
-        if (call.function?.name) {
-          console.log(`  ${prefix} Tool[${i}]: ${call.function.name}`);
-        }
-        if (call.function?.arguments) {
-          console.log(`  ${prefix} Args[${i}]: ${call.function.arguments}`);
-        }
-      });
+      chunkData.toolCalls = delta.tool_calls.map((call: any, i: number) => ({
+        index: i,
+        name: call.function?.name,
+        hasArgs: !!call.function?.arguments
+      }));
     }
+    llmLogger.trace('Stream chunk with tool calls', chunkData);
   }
   
   if (context.hasContent) {
     const content = chunk.choices?.[0]?.delta?.content || '';
-    console.log(`${prefix} 💬 CONTENT for ${context.userId}: "${content}"`);
+    chunkData.contentLength = content.length;
     
     // Check for mode-related content
     const contentLower = content.toLowerCase();
     if (contentLower.includes('video') || contentLower.includes('call') || 
         contentLower.includes('chat') || contentLower.includes('hang up')) {
-      console.log(`${prefix} 🎯 MODE-RELATED CONTENT DETECTED`);
+      chunkData.modeRelated = true;
     }
+    
+    llmLogger.trace('Stream chunk with content', chunkData);
   }
   
   if (context.finishReason) {
-    console.log(`${prefix} 🏁 FINISH_REASON for ${context.userId}: ${context.finishReason}`);
+    llmLogger.debug('Stream finished', { 
+      userId: context.userId,
+      finishReason: context.finishReason 
+    });
   }
 }
 
@@ -325,16 +296,13 @@ export function logModeTransition(context: {
 }): void {
   if (!CONFIG.enableModeTransitionLogging) return;
 
-  const separator = "🔄".repeat(30);
-  console.log(separator);
-  console.log(`🔄 MODE TRANSITION DEBUG - ${new Date().toISOString()}`);
-  console.log(`- User: ${context.userId}`);
-  console.log(`- App: ${context.appId}`);
-  console.log(`- Channel: ${context.channel}`);
-  console.log(`- From Mode: ${context.fromMode || 'unknown'}`);
-  console.log(`- To Mode: ${context.toMode || 'unknown'}`);
-  console.log(`- Trigger: ${context.trigger}`);
-  console.log(separator);
+  llmLogger.info('Mode transition detected', {
+    userId: context.userId,
+    appId: context.appId,
+    channel: context.channel,
+    transition: `${context.fromMode || 'unknown'} → ${context.toMode || 'unknown'}`,
+    trigger: context.trigger
+  });
 }
 
 /**
@@ -349,26 +317,22 @@ export function logRTMMessageProcessing(context: {
 }): void {
   if (!CONFIG.enableRTMMessageLogging) return;
 
-  const separator = "📨".repeat(40);
-  console.log(separator);
-  console.log(`📨 RTM MESSAGE PROCESSING - ${new Date().toISOString()}`);
-  console.log(separator);
-  
-  console.log(`📋 RTM MESSAGE CONTEXT:`);
-  console.log(`- User: ${context.userId}`);
-  console.log(`- App: ${context.appId}`);
-  console.log(`- Channel: ${context.channel}`);
-  console.log(`- Timestamp: ${new Date(context.timestamp).toISOString()}`);
-  console.log(`- Message Length: ${context.messageContent.length} chars`);
-  console.log(`- Message Content: ${context.messageContent}`);
+  const messageData: any = {
+    userId: context.userId,
+    appId: context.appId,
+    channel: context.channel,
+    messageLength: context.messageContent.length,
+    timestamp: new Date(context.timestamp).toISOString()
+  };
   
   // Analyze message for mode-related keywords
   const contentLower = context.messageContent.toLowerCase();
   const modeKeywords = ['video', 'call', 'chat', 'hang up', 'switch', 'text', 'bye', 'goodbye'];
   const foundKeywords = modeKeywords.filter(keyword => contentLower.includes(keyword));
   if (foundKeywords.length > 0) {
-    console.log(`📨 MODE-RELATED KEYWORDS DETECTED: ${foundKeywords.join(', ')}`);
+    messageData.modeKeywords = foundKeywords;
   }
   
-  console.log(separator);
+  llmLogger.debug('RTM message received', messageData);
+  llmLogger.trace('RTM message content', context.messageContent);
 }

@@ -1,8 +1,9 @@
 // lib/common/conversation-store.ts
 // Updated to store conversations by appId:userId:channel for proper isolation
-// Fixed to include channel in conversation key for group call support
+// Now using proper logging system
 
 import { CONFIG } from './cache';
+import { conversationLogger as logger } from './logger';
 
 // Define the interfaces - keep mode for internal tracking
 export interface Message {
@@ -18,7 +19,7 @@ export interface Message {
 export interface Conversation {
   appId: string;
   userId: string;
-  channel: string; // ADDED: Track channel for proper isolation
+  channel: string;
   messages: Message[];
   lastUpdated: number;
   rtmSystemMessage?: string;
@@ -64,7 +65,12 @@ function smartTrimConversation(conversation: Conversation): void {
     return;
   }
   
-  console.log(`[CONVERSATION] Trimming conversation for ${conversation.userId} in channel ${conversation.channel} (${messages.length} → target: ${MESSAGE_LIMITS.TARGET_MESSAGES})`);
+  logger.info(`Trimming conversation`, {
+    userId: conversation.userId,
+    channel: conversation.channel,
+    currentSize: messages.length,
+    targetSize: MESSAGE_LIMITS.TARGET_MESSAGES
+  });
   
   // Separate messages by type and importance
   const systemMessages = messages.filter(msg => msg.role === 'system');
@@ -115,8 +121,13 @@ function smartTrimConversation(conversation: Conversation): void {
   
   conversation.messages = keptMessages;
   
-  console.log(`[CONVERSATION] Trimmed to ${keptMessages.length} messages`);
-  console.log(`[CONVERSATION] Kept: ${systemMessages.length > 0 ? 1 : 0} system, ${chatMessages.length} chat, ${voiceVideoMessages.length} voice/video, ${relevantToolMessages.length} tool`);
+  logger.debug(`Conversation trimmed`, {
+    finalSize: keptMessages.length,
+    system: systemMessages.length > 0 ? 1 : 0,
+    chat: chatMessages.length,
+    voiceVideo: voiceVideoMessages.length,
+    tool: relevantToolMessages.length
+  });
 }
 
 /**
@@ -129,12 +140,18 @@ function manageSystemMessage(conversation: Conversation, newSystemContent: strin
   if (messageMode === 'chat' && !conversation.rtmSystemMessage) {
     conversation.rtmSystemMessage = newSystemContent;
     conversation.lastSystemMessageHash = newSystemHash;
-    console.log(`[CONVERSATION] Stored original RTM system message for ${conversation.userId} in channel ${conversation.channel}`);
+    logger.debug(`Stored original RTM system message`, {
+      userId: conversation.userId,
+      channel: conversation.channel
+    });
   }
   
   // Check if system message actually changed
   if (conversation.lastSystemMessageHash === newSystemHash) {
-    console.log(`[CONVERSATION] System message unchanged for ${conversation.userId} in channel ${conversation.channel}, skipping duplicate`);
+    logger.trace(`System message unchanged, skipping duplicate`, {
+      userId: conversation.userId,
+      channel: conversation.channel
+    });
     return;
   }
   
@@ -151,12 +168,17 @@ function manageSystemMessage(conversation: Conversation, newSystemContent: strin
   
   conversation.lastSystemMessageHash = newSystemHash;
   const modeType = messageMode === 'chat' ? 'RTM' : 'Endpoint';
-  console.log(`[CONVERSATION] Updated system message for ${conversation.userId} in channel ${conversation.channel} (${modeType}: ${messageMode})`);
+  
+  logger.debug(`Updated system message`, {
+    userId: conversation.userId,
+    channel: conversation.channel,
+    type: modeType,
+    mode: messageMode
+  });
 }
 
 /**
  * Gets a unique key for the conversation based on appId, userId, and channel
- * UPDATED: Now includes channel for proper conversation isolation
  */
 function getConversationKey(appId: string, userId: string, channel: string): string {
   return `${appId}:${userId}:${channel}`;
@@ -199,22 +221,7 @@ export function logConversationContext(
 ): void {
   if (!CONFIG.enableConversationLogging) return;
 
-  const separator = "💬".repeat(30);
-  console.log(separator);
-  console.log(`💬 CONVERSATION ${action.toUpperCase()} - ${new Date().toISOString()}`);
-  console.log(`- User: ${userId}`);
-  console.log(`- App: ${appId}`);
-  console.log(`- Channel: ${channel}`); // ADDED: Log channel for clarity
-  console.log(`- Total Messages: ${conversation.messages.length}`);
-  console.log(`- Last Updated: ${new Date(conversation.lastUpdated).toISOString()}`);
-  
-  // Memory usage analysis
   const memoryEstimate = JSON.stringify(conversation).length;
-  console.log(`- Memory Estimate: ${(memoryEstimate / 1024).toFixed(2)} KB`);
-  
-  if (conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES) {
-    console.log(`- ⚠️  HIGH MESSAGE COUNT: ${conversation.messages.length}/${MESSAGE_LIMITS.MAX_TOTAL_MESSAGES} (trimming needed)`);
-  }
   
   // Analyze message distribution by mode
   const messageStats = {
@@ -235,44 +242,34 @@ export function logConversationContext(
     else messageStats.unspecified++;
   });
   
-  console.log(`💬 MESSAGE DISTRIBUTION:`);
-  console.log(`  - System: ${messageStats.system}`);
-  console.log(`  - Chat (RTM): ${messageStats.chat}`);
-  console.log(`  - Video (Endpoint): ${messageStats.video}`);
-  console.log(`  - Voice (Endpoint): ${messageStats.voice}`);
-  console.log(`  - Tool: ${messageStats.tool}`);
-  console.log(`  - Unspecified: ${messageStats.unspecified}`);
+  logger.debug(`Conversation ${action}`, {
+    userId,
+    appId,
+    channel,
+    totalMessages: conversation.messages.length,
+    memoryKB: (memoryEstimate / 1024).toFixed(2),
+    distribution: messageStats,
+    isHighMessageCount: conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES
+  });
   
-  // Show recent message sequence - FIXED FORMAT
+  // Show recent message sequence
   if (conversation.messages.length > 0) {
-    console.log(`💬 RECENT MESSAGES (last 3):`);
-    const recentMessages = conversation.messages.slice(-3);
-    recentMessages.forEach((msg, index) => {
+    const recentMessages = conversation.messages.slice(-3).map((msg, index) => {
       const actualIndex = conversation.messages.length - 3 + index;
-      
-      // Extract user ID from content if present
       const { userId: extractedUserId, cleanContent } = extractUserIdForDisplay(msg.content || '');
       
-      // Format the message properly
-      let formattedMessage = '';
+      let summary = '';
       if (msg.role === 'user' && extractedUserId) {
-        // For user messages with ID prefix, show as: user [userId]: content
-        formattedMessage = `  [${actualIndex}] ${msg.role} [${extractedUserId}]: ${cleanContent}`;
+        summary = `[${actualIndex}] user [${extractedUserId}]: ${cleanContent}`;
       } else {
-        // For other messages, show as: role: content
-        formattedMessage = `  [${actualIndex}] ${msg.role}: ${msg.content || '[no content]'}`;
+        summary = `[${actualIndex}] ${msg.role}: ${msg.content || '[no content]'}`;
       }
       
-      // Truncate long messages
-      if (formattedMessage.length > 80) {
-        formattedMessage = formattedMessage.substring(0, 77) + '...';
-      }
-      
-      console.log(formattedMessage);
+      return summary.length > 80 ? summary.substring(0, 77) + '...' : summary;
     });
+    
+    logger.trace('Recent messages', recentMessages);
   }
-  
-  console.log(separator);
 }
 
 /**
@@ -321,24 +318,27 @@ export function detectModeTransition(conversation: Conversation): {
 
 /**
  * Gets an existing conversation or creates a new one if it doesn't exist
- * UPDATED: Now requires channel parameter for proper conversation isolation
  */
 export async function getOrCreateConversation(appId: string, userId: string, channel: string = 'default'): Promise<Conversation> {
   const key = getConversationKey(appId, userId, channel);
   
   if (!conversationStore[key]) {
-    console.log(`[CONVERSATION] Creating new conversation for ${userId} in app ${appId}, channel ${channel}`);
+    logger.info(`Creating new conversation`, { userId, appId, channel });
     conversationStore[key] = {
       appId,
       userId,
-      channel, // ADDED: Store channel in conversation object
+      channel,
       messages: [],
       lastUpdated: Date.now()
     };
     
     logConversationContext(appId, userId, channel, conversationStore[key], 'created');
   } else {
-    console.log(`[CONVERSATION] Found existing conversation for ${userId} in channel ${channel} with ${conversationStore[key].messages.length} messages`);
+    logger.trace(`Found existing conversation`, {
+      userId,
+      channel,
+      messageCount: conversationStore[key].messages.length
+    });
     logConversationContext(appId, userId, channel, conversationStore[key], 'retrieved');
   }
   
@@ -347,8 +347,6 @@ export async function getOrCreateConversation(appId: string, userId: string, cha
 
 /**
  * Simplified saveMessage with mode-based memory management
- * Mode is stored internally but not sent to LLM
- * UPDATED: Now requires channel parameter
  */
 export async function saveMessage(
   appId: string, 
@@ -384,7 +382,15 @@ export async function saveMessage(
   
   const modeInfo = enhancedMessage.mode ? ` [${enhancedMessage.mode}]` : '';
   const serviceInfo = enhancedMessage.mode === 'chat' ? ' (RTM)' : enhancedMessage.mode ? ' (Endpoint)' : '';
-  console.log(`[CONVERSATION] Saved ${message.role} message${modeInfo}${serviceInfo} for ${userId} in channel ${channel}. Conversation now has ${conversation.messages.length} messages`);
+  
+  logger.debug(`Saved message`, {
+    role: message.role,
+    mode: enhancedMessage.mode,
+    service: serviceInfo.replace(/[() ]/g, ''),
+    userId,
+    channel,
+    totalMessages: conversation.messages.length
+  });
   
   logConversationContext(appId, userId, channel, conversation, 'updated');
 }
@@ -408,7 +414,11 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
     conversationSizes.push({ key, size, age });
   });
   
-  console.log(`[CONVERSATION] Memory usage: ${(totalMemoryEstimate / 1024 / 1024).toFixed(2)} MB across ${Object.keys(conversationStore).length} conversations`);
+  const totalMemoryMB = totalMemoryEstimate / 1024 / 1024;
+  logger.info(`Memory usage check`, {
+    totalMB: totalMemoryMB.toFixed(2),
+    conversationCount: Object.keys(conversationStore).length
+  });
   
   // Remove old conversations
   Object.keys(conversationStore).forEach(key => {
@@ -416,7 +426,11 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
     const age = now - conversation.lastUpdated;
     
     if (age > maxAgeMs) {
-      console.log(`[CONVERSATION] Removing old conversation: ${conversation.userId} in channel ${conversation.channel} (age: ${Math.round(age/1000/60)} minutes)`);
+      logger.debug(`Removing old conversation`, {
+        userId: conversation.userId,
+        channel: conversation.channel,
+        ageMinutes: Math.round(age/1000/60)
+      });
       delete conversationStore[key];
       removedCount++;
     } else if (conversation.messages.length > MESSAGE_LIMITS.TARGET_MESSAGES) {
@@ -427,8 +441,11 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
   
   // Memory pressure cleanup
   const MAX_TOTAL_MEMORY_MB = 50;
-  if (totalMemoryEstimate > MAX_TOTAL_MEMORY_MB * 1024 * 1024) {
-    console.log(`[CONVERSATION] Memory pressure detected (${(totalMemoryEstimate / 1024 / 1024).toFixed(2)} MB), removing largest conversations`);
+  if (totalMemoryMB > MAX_TOTAL_MEMORY_MB) {
+    logger.warn(`Memory pressure detected`, {
+      currentMB: totalMemoryMB.toFixed(2),
+      maxMB: MAX_TOTAL_MEMORY_MB
+    });
     
     conversationSizes.sort((a, b) => b.size - a.size);
     
@@ -439,7 +456,11 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
       if (memoryFreed >= targetToFree) break;
       
       const conversation = conversationStore[key];
-      console.log(`[CONVERSATION] Removing large conversation ${conversation.userId} in channel ${conversation.channel} (${(size / 1024).toFixed(2)} KB)`);
+      logger.debug(`Removing large conversation`, {
+        userId: conversation.userId,
+        channel: conversation.channel,
+        sizeKB: (size / 1024).toFixed(2)
+      });
       delete conversationStore[key];
       memoryFreed += size;
       removedCount++;
@@ -447,7 +468,7 @@ export function cleanupOldConversations(maxAgeMs: number = MAX_CONVERSATION_AGE_
   }
   
   if (removedCount > 0 || trimmedCount > 0) {
-    console.log(`[CONVERSATION] Cleanup complete: ${removedCount} removed, ${trimmedCount} trimmed`);
+    logger.info(`Cleanup complete`, { removed: removedCount, trimmed: trimmedCount });
   }
 }
 
@@ -498,7 +519,7 @@ export function getConversationStats(): any {
     oldestConversationAgeHours: oldestConversationAge / (60 * 60 * 1000),
     averageMessagesPerConversation: totalConversations ? totalMessages / totalConversations : 0,
     messagesByMode: modeStats,
-    conversationsByChannel: channelStats, // ADDED: Channel-based statistics
+    conversationsByChannel: channelStats,
     memoryLimits: MESSAGE_LIMITS
   };
 }
@@ -510,11 +531,11 @@ export async function clearAllConversations(): Promise<void> {
   Object.keys(conversationStore).forEach(key => {
     delete conversationStore[key];
   });
-  console.log('[CONVERSATION] Cleared all conversations');
+  logger.info('Cleared all conversations');
 }
 
 /**
- * ADDED: Get conversations for a specific channel (useful for debugging)
+ * Get conversations for a specific channel (useful for debugging)
  */
 export function getConversationsForChannel(appId: string, channel: string): Conversation[] {
   return Object.values(conversationStore).filter(convo => 
@@ -523,7 +544,7 @@ export function getConversationsForChannel(appId: string, channel: string): Conv
 }
 
 /**
- * ADDED: Get all channels for an app (useful for debugging)
+ * Get all channels for an app (useful for debugging)
  */
 export function getChannelsForApp(appId: string): string[] {
   const channels = new Set<string>();
@@ -541,13 +562,16 @@ if (typeof window === 'undefined') {
     try {
       cleanupOldConversations();
     } catch (error) {
-      console.error('[CONVERSATION] Error during cleanup:', error);
+      logger.error('Error during cleanup', error);
     }
   }, CLEANUP_INTERVAL_MS);
   
-  console.log('[CONVERSATION] Conversation store initialized with channel-based memory management');
-  console.log(`[CONVERSATION] Key format: appId:userId:channel for proper conversation isolation`);
-  console.log(`[CONVERSATION] Limits: ${MESSAGE_LIMITS.MAX_TOTAL_MESSAGES} max messages, ${MESSAGE_LIMITS.TARGET_MESSAGES} target, cleanup every ${CLEANUP_INTERVAL_MS / (60 * 1000)} minutes`);
+  logger.info('Conversation store initialized', {
+    keyFormat: 'appId:userId:channel',
+    maxMessages: MESSAGE_LIMITS.MAX_TOTAL_MESSAGES,
+    targetMessages: MESSAGE_LIMITS.TARGET_MESSAGES,
+    cleanupIntervalMinutes: CLEANUP_INTERVAL_MS / (60 * 1000)
+  });
 }
 
 export { smartTrimConversation, MESSAGE_LIMITS };

@@ -1,9 +1,12 @@
 // lib/endpoints/example-endpoint.ts
-// Simplified example endpoint - mode instructions now handled by shared helpers
+// Updated with proper logging system
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
 import { sendPhotoMessage } from '../common/messaging-utils';
+import { toolLogger, createLogger } from '../common/logger';
+
+const logger = createLogger('EXAMPLE-ENDPOINT');
 
 // Define RAG data for this endpoint
 const EXAMPLE_RAG_DATA = {
@@ -98,6 +101,34 @@ const PHOTO_RATE_LIMIT_MS = 30000; // 30 seconds between photos
 // Simple counter-based approach - tracks photo sends per user
 const recentPhotoSends = new Map<string, number>();
 
+// Cleanup timer to prevent memory leaks
+let cleanupTimer: NodeJS.Timeout | null = null;
+
+// Start cleanup timer on module load
+function startPhotoCleanupTimer(): void {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+  }
+  
+  cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    const cutoff = now - (PHOTO_RATE_LIMIT_MS * 2);
+    let cleanedCount = 0;
+    
+    const entries = Array.from(recentPhotoSends.entries());
+    for (const [key, timestamp] of entries) {
+      if (timestamp < cutoff) {
+        recentPhotoSends.delete(key);
+        cleanedCount++;
+      }
+    }
+    
+    if (cleanedCount > 0) {
+      logger.debug(`Cleaned up old photo send entries`, { count: cleanedCount });
+    }
+  }, 60000); // Run every minute
+}
+
 // Helper function to check recent photo sends
 async function hasRecentPhotoSend(appId: string, userId: string, timeWindowMs: number): Promise<boolean> {
   try {
@@ -106,19 +137,28 @@ async function hasRecentPhotoSend(appId: string, userId: string, timeWindowMs: n
     const lastPhotoTime = recentPhotoSends.get(userKey) || 0;
     const timeSinceLastPhoto = now - lastPhotoTime;
     
-    console.log(`📸 CHECKING RECENT PHOTO SENDS: userKey=${userKey}, timeSinceLastPhoto=${timeSinceLastPhoto}ms, timeWindow=${timeWindowMs}ms`);
+    logger.trace(`Checking recent photo sends`, {
+      userKey,
+      timeSinceLastPhoto,
+      timeWindow: timeWindowMs
+    });
     
     // Check timestamp-based rate limiting
     if (timeSinceLastPhoto < timeWindowMs) {
       const remainingTime = Math.ceil((timeWindowMs - timeSinceLastPhoto) / 1000);
-      console.log(`📸 TIMESTAMP RATE LIMITED: ${timeSinceLastPhoto}ms ago, ${remainingTime}s remaining`);
+      logger.debug(`Photo rate limited`, {
+        timeSinceLastPhoto,
+        remainingSeconds: remainingTime
+      });
       return true;
     }
     
-    console.log(`📸 NO RECENT PHOTO ACTIVITY: Last photo was ${timeSinceLastPhoto}ms ago`);
+    logger.trace(`No recent photo activity`, {
+      lastPhotoMs: timeSinceLastPhoto
+    });
     return false;
   } catch (error) {
-    console.error('📸 ERROR checking recent photo sends:', error);
+    logger.error('Error checking recent photo sends', error);
     return false; // Default to allowing if we can't check
   }
 }
@@ -129,35 +169,23 @@ function markPhotoSent(appId: string, userId: string): void {
   const now = Date.now();
   recentPhotoSends.set(userKey, now);
   
-  console.log(`📸 MARKED PHOTO SENT: userKey=${userKey}, timestamp=${now}`);
-  
-  // Clean up old entries to prevent memory leaks
-  const cutoff = now - (PHOTO_RATE_LIMIT_MS * 2); // Keep entries for 2x the rate limit
-  let cleanedCount = 0;
-  
-  // Fixed iteration: Convert entries to array first
-  const entries = Array.from(recentPhotoSends.entries());
-  for (const [key, timestamp] of entries) {
-    if (timestamp < cutoff) {
-      recentPhotoSends.delete(key);
-      cleanedCount++;
-    }
-  }
-  
-  if (cleanedCount > 0) {
-    console.log(`📸 CLEANED UP ${cleanedCount} old photo send entries`);
-  }
+  logger.debug(`Marked photo sent`, { userKey, timestamp: now });
 }
 
 // Implement the tool functions with enhanced logging
 function order_sandwich(appId: string, userId: string, channel: string, args: any): string {
   const filling = args?.filling || "Unknown";
   
-  console.log(`🥪 SANDWICH TOOL CALLED:`, { appId, userId, channel, filling });
-  console.log(`🥪 Placing sandwich order for ${userId} in ${channel} with filling: ${filling}`);
+  toolLogger.info(`Sandwich order placed`, {
+    appId,
+    userId,
+    channel,
+    filling
+  });
   
   const result = `Sandwich ordered with ${filling}. It will arrive at 3pm. Enjoy!`;
-  console.log(`🥪 SANDWICH TOOL RESULT:`, result);
+  
+  toolLogger.debug(`Sandwich order result`, { result });
   
   return result;
 }
@@ -166,29 +194,32 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
   // Handle null/empty args safely
   const subject = args?.subject || "default";
 
-  console.log(`📸 PHOTO TOOL CALLED:`, { appId, userId, channel, subject, argsReceived: args });
+  toolLogger.info(`Photo tool called`, {
+    appId,
+    userId,
+    channel,
+    subject
+  });
   
   // Enhanced rate limiting check using timestamps only
   const hasRecentPhoto = await hasRecentPhotoSend(appId, userId, PHOTO_RATE_LIMIT_MS);
   
   if (hasRecentPhoto) {
     const cooldownMessage = `I just sent you a photo recently! Let's chat a bit more before I send another one 😊`;
-    console.log(`📸 RATE LIMITED: ${cooldownMessage}`);
+    toolLogger.debug(`Photo rate limited`, { userId });
     return cooldownMessage;
   }
-  
-  console.log(`📸 Sending ${subject} photo to ${userId} in ${channel}`);
   
   // Check environment variables - for RTM chat, use the RTM-specific from user
   let fromUser = process.env.RTM_FROM_USER;
   
   if (!fromUser) {
-    console.error('📸 ERROR: RTM_FROM_USER environment variable is not set');
+    logger.error('RTM_FROM_USER environment variable is not set');
     return `Failed to send photo: Missing RTM_FROM_USER configuration.`;
   }
   
   if (!appId) {
-    console.error('📸 ERROR: appId is missing');
+    logger.error('appId is missing');
     return `Failed to send photo: Missing appId.`;
   }
 
@@ -197,9 +228,12 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
   const selectedPhoto = PHOTO_OPTIONS[randomIndex];
   const imageUrl = `https://sa-utils.agora.io/mms/${selectedPhoto}`;
   
-  console.log(`📸 Randomly selected photo: ${selectedPhoto} (${randomIndex + 1}/${PHOTO_OPTIONS.length})`);
-  console.log(`📸 Full image URL: ${imageUrl}`);
-  console.log(`📸 Using fromUser: ${fromUser}, appId: ${appId}, channel: ${channel}`);
+  toolLogger.debug(`Photo selected`, {
+    photo: selectedPhoto,
+    index: randomIndex + 1,
+    total: PHOTO_OPTIONS.length,
+    url: imageUrl
+  });
   
   // Mark photo as sent BEFORE attempting to send (prevents race conditions)
   markPhotoSent(appId, userId);
@@ -217,18 +251,16 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     let result: string;
     if (success) {
       result = `Sending you a photo! 📸 (${selectedPhoto.replace('.png', '').replace('april_', '').replace('_', ' ')}) - it'll arrive in a moment!`;
-      console.log(`📸 SUCCESS: ${result}`);
+      toolLogger.info(`Photo sent successfully`, { userId, photo: selectedPhoto });
     } else {
       result = `We encountered an issue scheduling the photo. Please try again later.`;
-      console.log(`📸 FAILURE: ${result}`);
+      toolLogger.warn(`Photo send failed`, { userId });
     }
     
-    console.log(`📸 PHOTO TOOL RESULT: ${result}`);
     return result;
   } catch (error) {
-    console.error(`📸 PHOTO TOOL ERROR:`, error);
+    toolLogger.error(`Photo tool error`, { userId, error });
     const errorResult = `Error sending photo: ${error instanceof Error ? error.message : 'Unknown error'}`;
-    console.log(`📸 PHOTO TOOL ERROR RESULT:`, errorResult);
     return errorResult;
   }
 }
@@ -236,34 +268,38 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
 // Create the tool map with debug wrappers
 const EXAMPLE_TOOL_MAP = {
   order_sandwich: (appId: string, userId: string, channel: string, args: any) => {
-    console.log(`🔧 TOOL MAP: order_sandwich wrapper called for channel: ${channel}`);
+    toolLogger.trace(`Tool map: order_sandwich wrapper called`, { channel });
     try {
       const result = order_sandwich(appId, userId, channel, args);
-      console.log(`🔧 TOOL MAP: order_sandwich wrapper completed successfully`);
+      toolLogger.trace(`Tool map: order_sandwich completed`);
       return result;
     } catch (error) {
-      console.error(`🔧 TOOL MAP: order_sandwich wrapper error:`, error);
+      toolLogger.error(`Tool map: order_sandwich error`, error);
       throw error;
     }
   },
   send_photo: async (appId: string, userId: string, channel: string, args: any) => {
-    console.log(`🔧 TOOL MAP: send_photo wrapper called for channel: ${channel}, args:`, args);
+    toolLogger.trace(`Tool map: send_photo wrapper called`, { channel, args });
     try {
       const result = await send_photo(appId, userId, channel, args);
-      console.log(`🔧 TOOL MAP: send_photo wrapper completed successfully`);
+      toolLogger.trace(`Tool map: send_photo completed`);
       return result;
     } catch (error) {
-      console.error(`🔧 TOOL MAP: send_photo wrapper error:`, error);
+      toolLogger.error(`Tool map: send_photo error`, error);
       throw error;
     }
   }
 };
 
+// Start cleanup timer on module load
+startPhotoCleanupTimer();
+
 // Debug logging at module load time
-console.log('🔧 Example endpoint simplified - mode instructions handled by shared helpers');
-console.log('🔧 Example endpoint tool map configured with tools:', Object.keys(EXAMPLE_TOOL_MAP));
-console.log('📸 Available photo options:', PHOTO_OPTIONS);
-console.log('📸 Photo rate limit configured:', PHOTO_RATE_LIMIT_MS, 'ms (timestamp-based)');
+logger.info('Example endpoint initialized', {
+  tools: Object.keys(EXAMPLE_TOOL_MAP),
+  photoOptions: PHOTO_OPTIONS,
+  photoRateLimitMs: PHOTO_RATE_LIMIT_MS
+});
 
 // Export the complete endpoint configuration with communication modes
 export const exampleEndpointConfig: EndpointConfig = {

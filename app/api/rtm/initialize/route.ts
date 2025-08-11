@@ -1,6 +1,10 @@
 // app/api/rtm/initialize/route.ts
+// Updated to remove legacy RTM service - only shows modern endpoint-based RTM status
 
 import { NextResponse } from 'next/server';
+import { createLogger } from '@/lib/common/logger';
+
+const logger = createLogger('RTM-INIT');
 
 export async function GET() {
   // This route is kept for backwards compatibility but returns info about the modern setup
@@ -20,23 +24,24 @@ export async function GET() {
       channel: !!process.env.GROUPCALL_RTM_CHANNEL,
       llm_configured: !!process.env.GROUPCALL_RTM_LLM_API_KEY
     },
-    legacy: {
-      configured: !!(process.env.RTM_APP_ID && process.env.RTM_FROM_USER),
-      app_id: !!process.env.RTM_APP_ID,
-      from_user: !!process.env.RTM_FROM_USER,
-      channel: !!process.env.RTM_CHANNEL
+    dripshop: {
+      configured: false, // Dripshop doesn't use RTM (pure API endpoint)
+      app_id: false,
+      from_user: false,
+      channel: false,
+      llm_configured: false,
+      note: 'Dripshop is a pure API endpoint without RTM chat support'
     }
   };
 
-  console.log('[RTM] Endpoint RTM Configuration Status:', endpointStatus);
+  logger.info('Endpoint RTM Configuration Status', endpointStatus);
 
   return NextResponse.json({ 
     success: true, 
     message: 'Using modern endpoint-based RTM system',
     info: 'RTM is initialized per-endpoint when first accessed',
     endpoints: endpointStatus,
-    recommendation: endpointStatus.legacy.configured ? 
-      'Legacy RTM variables detected but not used' : 
-      'No legacy RTM configuration (this is expected)'
+    legacy_rtm_removed: true,
+    recommendation: 'Each endpoint manages its own RTM configuration independently'
   });
 }
