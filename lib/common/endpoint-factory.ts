@@ -1,6 +1,6 @@
 // lib/common/endpoint-factory.ts
 // Factory function to create standardized endpoint handlers
-// Updated with proper logging system
+// Updated with proper logging system and fixed duplicate logging issues
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
@@ -304,34 +304,40 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       const shouldPrepend = shouldPrependUserId(config);
       const shouldPrependMode = shouldPrependCommunicationMode(config);
       
-      if (shouldPrepend) {
-        logger.info(`User ID prepending enabled`, { userId });
-      }
-      if (shouldPrependMode) {
-        logger.info(`Communication mode prepending enabled`);
+      if (shouldPrepend || shouldPrependMode) {
+        logger.info(`[${endpointName || 'UNKNOWN'}] Prefixing configuration`, {
+          endpoint: endpointName,
+          userId: shouldPrepend ? userId : 'disabled',
+          communicationMode: shouldPrependMode ? 'enabled' : 'disabled'
+        });
       }
 
-      // C) Initialize RTM chat for this endpoint (only if endpointName is provided)
+      // C) Initialize RTM chat for this endpoint (only if endpointName is provided AND chat is supported)
       if (endpointName) {
-        try {
-          await endpointChatManager.initializeEndpointChat(endpointName, config);
-        } catch (chatInitError) {
-          logger.warn(`RTM chat initialization failed`, { endpoint: endpointName, error: chatInitError });
-        }
+        const supportsChat = config.communicationModes?.supportsChat || false;
+        
+        if (supportsChat) {
+          try {
+            await endpointChatManager.initializeEndpointChat(endpointName, config);
+          } catch (chatInitError) {
+            logger.warn(`[${endpointName}] RTM chat initialization failed`, { error: chatInitError });
+          }
 
-        // D) Check for custom system message and update chat handler BEFORE processing
-        if (originalMessages && Array.isArray(originalMessages) && originalMessages.length > 0 && 
-            originalMessages[0].role === 'system' && appId) {
-          logger.debug(`Custom system message detected, updating chat handler`, { endpoint: endpointName });
-          endpointChatManager.updateSystemMessage(endpointName, appId, originalMessages[0].content);
+          // D) Check for custom system message and update chat handler BEFORE processing
+          if (originalMessages && Array.isArray(originalMessages) && originalMessages.length > 0 && 
+              originalMessages[0].role === 'system' && appId) {
+            logger.debug(`[${endpointName}] Custom system message detected, updating chat handler`);
+            endpointChatManager.updateSystemMessage(endpointName, appId, originalMessages[0].content);
+          }
+        } else {
+          logger.debug(`[${endpointName}] RTM chat not initialized (endpoint doesn't support chat mode)`);
         }
       }
 
       // Log communication mode configuration
-      logger.debug(`Communication mode config`, {
-        endpoint: endpointName,
-        supportsChat: config.communicationModes?.supportsChat,
-        endpointMode: config.communicationModes?.endpointMode,
+      logger.debug(`[${endpointName || 'UNKNOWN'}] Communication mode config`, {
+        supportsChat: config.communicationModes?.supportsChat || false,
+        endpointMode: config.communicationModes?.endpointMode || null,
         prependUserId: shouldPrepend,
         prependCommunicationMode: shouldPrependMode,
         channel
@@ -362,12 +368,13 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       
       // Skip validation for GET requests used for initialization
       if (req.method === 'GET') {
-        logger.info(`GET request for endpoint initialization`, {
+        logger.info(`[${endpointName || 'UNKNOWN'}] GET request for endpoint initialization`, {
           endpoint: endpointName || 'unknown',
           rtmChatActive: endpointName ? endpointChatManager.isEndpointChatActive(endpointName) : false
         });
         return NextResponse.json({ 
           message: 'Endpoint initialized successfully',
+          endpoint: endpointName || 'unknown',
           rtm_chat_active: endpointName ? endpointChatManager.isEndpointChatActive(endpointName) : false,
           communication_modes: {
             supportsChat: config.communicationModes?.supportsChat || false,
@@ -445,11 +452,9 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       });
       
       // Process request messages and insert cached tool responses if needed
-      const processedRequestMessages = insertCachedToolResponses(processedMessages, {
-        prependUserId: shouldPrepend,
-        userId: shouldPrepend ? userId : undefined,
-        prependCommunicationMode: shouldPrependMode
-      });
+      // Note: insertCachedToolResponses already applies cleanMessagesForLLM internally
+      // So we DON'T pass the prefixing options here to avoid double-processing
+      const processedRequestMessages = insertCachedToolResponses(processedMessages);
       
       // Save the enhanced system message
       logger.debug(`Managing enhanced system message`, { userId, channel });
@@ -482,17 +487,38 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       });
 
       // Save user messages to conversation with mode information
+      let modeTransitionLogged = false;
       for (const message of processedRequestMessages) {
         if (message.role === 'user') {
-          // LOG MODE TRANSITION
-          logModeTransition({
-            userId,
-            appId,
-            fromMode: 'unknown',
-            toMode: endpointMode || 'unspecified',
-            channel,
-            trigger: 'api_call'
-          });
+          // LOG MODE TRANSITION (only once per request and only if endpoint supports multiple modes)
+          if (!modeTransitionLogged) {
+            // Only log mode transitions if the endpoint supports chat (meaning it can switch modes)
+            // Pure API endpoints with a single mode don't need transition logging
+            const supportsMultipleModes = config.communicationModes?.supportsChat === true;
+            
+            if (supportsMultipleModes) {
+              // Detect previous mode from conversation history
+              const previousUserMessages = managedConversation.messages.filter(msg => 
+                msg.role === 'user' && msg.mode
+              );
+              const previousMode = previousUserMessages.length > 0 
+                ? previousUserMessages[previousUserMessages.length - 1].mode 
+                : undefined;
+              
+              // Only log if there's an actual transition
+              if (!previousMode || previousMode !== endpointMode) {
+                logModeTransition({
+                  userId,
+                  appId,
+                  fromMode: previousMode,
+                  toMode: endpointMode || 'unspecified',
+                  channel,
+                  trigger: 'api_call'
+                });
+              }
+            }
+            modeTransitionLogged = true;
+          }
 
           await saveMessage(appId, userId, channel, {
             role: 'user',
@@ -506,7 +532,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       const cleanedFinalMessages = cleanMessagesForLLM(finalMessages, {
         prependUserId: shouldPrepend,
         userId: shouldPrepend ? userId : undefined,
-        prependCommunicationMode: shouldPrependMode
+        prependCommunicationMode: shouldPrependMode,
+        endpoint: endpointName // Pass endpoint name for better logging
       });
 
       // Common request parameters

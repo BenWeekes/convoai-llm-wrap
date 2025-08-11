@@ -4,9 +4,10 @@
 import { createEndpointHandler } from '@/lib/common/endpoint-factory';
 import { dripshopEndpointConfig } from '@/lib/endpoints/dripshop-endpoint';
 
-// Create the handler WITHOUT endpoint name - this prevents RTM initialization
-// Since we pass undefined as the second parameter, no RTM chat will be initialized
-const handler = createEndpointHandler(dripshopEndpointConfig);
+// Create the handler with endpoint name for logging purposes
+// Even though dripshop doesn't support RTM chat, we still pass the name for better logging
+// The endpoint configuration (supportsChat: false) will prevent RTM initialization
+const handler = createEndpointHandler(dripshopEndpointConfig, 'DRIPSHOP');
 
 // Export the handler for both GET and POST
 export const GET = handler;

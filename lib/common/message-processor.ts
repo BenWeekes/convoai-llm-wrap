@@ -1,6 +1,6 @@
 // File: lib/common/message-processor.ts
 // Updated to use content prefixes instead of non-standard properties
-// Added group call user ID prepending functionality
+// Fixed double-prefixing issue with better prefix detection
 
 import { getToolResponse } from './cache';
 
@@ -35,14 +35,26 @@ export function addModePrefix(content: string, mode?: string): string {
 /**
  * Add user ID prefix to message content for group calls
  * Format: [userId] message content
+ * Fixed to prevent double-prefixing
  */
-export function addUserIdPrefix(content: string, userId: string): string {
-  // Don't add prefix if content already has a user ID prefix pattern
-  if (content.match(/^\[[^\]]+\]/)) {
+export function addUserIdPrefix(content: string, userId: string, endpoint?: string): string {
+  // Check if content already has ANY user ID prefix pattern (not just matching this user)
+  // This prevents double-prefixing
+  const hasAnyPrefix = content.match(/^\[[^\]]+\]/);
+  if (hasAnyPrefix) {
+    // Only log if we're in debug mode to reduce noise
+    if (process.env.LOG_LEVEL === 'DEBUG' || process.env.LOG_LEVEL === 'TRACE') {
+      console.log(`[${endpoint || 'PROCESSOR'}] Skipping duplicate prefix: "${hasAnyPrefix[0]}" already exists`);
+    }
     return content;
   }
 
-  return `[${userId}] ${content}`;
+  const prefixedContent = `[${userId}] ${content}`;
+  // Only log the actual prefixing action in trace mode to reduce noise
+  if (process.env.LOG_LEVEL === 'TRACE') {
+    console.log(`[${endpoint || 'PROCESSOR'}] Added user ID prefix [${userId}]`);
+  }
+  return prefixedContent;
 }
 
 /**
@@ -78,14 +90,30 @@ export function extractModeFromContent(content: string): { mode?: string; cleanC
 /**
  * Extract user ID from message content prefix
  * Returns the user ID and content without the user ID prefix
+ * Handles nested prefixes correctly
  */
 export function extractUserIdFromContent(content: string): { userId?: string; cleanContent: string } {
+  // Look for the FIRST bracket pair only
   const userIdMatch = content.match(/^\[([^\]]+)\]\s*(.*)/);
   
   if (userIdMatch) {
+    const extractedUserId = userIdMatch[1];
+    const remainingContent = userIdMatch[2];
+    
+    // Check if there's a nested prefix (shouldn't happen with fix, but handle gracefully)
+    const nestedMatch = remainingContent.match(/^\[([^\]]+)\]\s*(.*)/);
+    if (nestedMatch) {
+      console.warn(`[MESSAGE-PROCESSOR] Detected nested user ID prefix: [${extractedUserId}] [${nestedMatch[1]}]`);
+      // Return the outer prefix and the content after all prefixes
+      return {
+        userId: extractedUserId,
+        cleanContent: nestedMatch[2]
+      };
+    }
+    
     return {
-      userId: userIdMatch[1],
-      cleanContent: userIdMatch[2]
+      userId: extractedUserId,
+      cleanContent: remainingContent
     };
   }
   
@@ -125,11 +153,13 @@ function getActualUserId(message: any, fallbackUserId?: string): string | undefi
  * Removes: mode, timestamp, and any other non-standard properties
  * Keeps only: role, content, name, tool_calls, tool_call_id
  * Adds mode prefixes and user ID prefixes when enabled
+ * Fixed to prevent double-prefixing
  */
 export function cleanMessageForLLM(message: any, options?: { 
   prependUserId?: boolean; 
   userId?: string;
   prependCommunicationMode?: boolean;
+  endpoint?: string; // Add endpoint for better logging context
 }): any {
   const cleaned: any = {
     role: message.role,
@@ -151,8 +181,13 @@ export function cleanMessageForLLM(message: any, options?: {
       const actualUserId = getActualUserId(message, options?.userId);
       
       if (actualUserId) {
-        processedContent = addUserIdPrefix(processedContent, actualUserId);
-        console.log(`[MESSAGE-PROCESSOR] Added user ID prefix: [${actualUserId}] ${message.content.substring(0, 50)}...`);
+        // Check if content already has a prefix to avoid double-prefixing
+        const hasPrefix = processedContent.match(/^\[[^\]]+\]/);
+        if (!hasPrefix) {
+          processedContent = addUserIdPrefix(processedContent, actualUserId, options?.endpoint);
+        } else if (process.env.LOG_LEVEL === 'DEBUG' || process.env.LOG_LEVEL === 'TRACE') {
+          console.log(`[${options?.endpoint || 'PROCESSOR'}] Skipping user ID prefix - already has: ${hasPrefix[0]}`);
+        }
       }
     }
     
@@ -164,8 +199,15 @@ export function cleanMessageForLLM(message: any, options?: {
     cleaned.content = processedContent;
   } else if (message.role === 'assistant' && message.content) {
     // For assistant messages, clean any prefixes the LLM might have added
-    const { cleanContent } = extractModeFromContent(message.content);
-    cleaned.content = cleanContent;
+    let cleanedContent = message.content;
+    
+    // Remove mode prefixes
+    const { cleanContent: contentWithoutMode } = extractModeFromContent(cleanedContent);
+    cleanedContent = contentWithoutMode;
+    
+    // Remove user ID prefixes if they exist (shouldn't happen but be safe)
+    const { cleanContent: finalContent } = extractUserIdFromContent(cleanedContent);
+    cleaned.content = finalContent;
   }
 
   // Explicitly DO NOT include these non-standard properties:
@@ -179,12 +221,17 @@ export function cleanMessageForLLM(message: any, options?: {
 }
 
 /**
- * Clean assistant response content by removing any mode prefixes
+ * Clean assistant response content by removing any mode or user ID prefixes
  * This prevents the LLM from learning to echo prefixes back
  */
 export function cleanAssistantResponse(content: string): string {
-  const { cleanContent } = extractModeFromContent(content);
-  return cleanContent;
+  // First remove mode prefixes
+  const { cleanContent: contentWithoutMode } = extractModeFromContent(content);
+  
+  // Then remove any user ID prefixes (shouldn't be there but be thorough)
+  const { cleanContent: finalContent } = extractUserIdFromContent(contentWithoutMode);
+  
+  return finalContent;
 }
 
 /**
@@ -195,19 +242,23 @@ export function cleanMessagesForLLM(messages: any[], options?: {
   prependUserId?: boolean; 
   userId?: string;
   prependCommunicationMode?: boolean;
+  endpoint?: string; // Add endpoint for logging context
 }): any[] {
+  // Log summary once instead of for each message
+  if (options?.prependUserId && process.env.LOG_LEVEL === 'DEBUG') {
+    const userMessages = messages.filter(m => m.role === 'user').length;
+    console.log(`[${options?.endpoint || 'PROCESSOR'}] Processing ${userMessages} user messages with ID prefixing for ${options.userId}`);
+  }
+  
   return messages.map(message => cleanMessageForLLM(message, options));
 }
 
 /**
  * Process messages and insert cached tool responses where needed
- * Now also cleans messages for LLM compatibility with optional user ID and communication mode prefixing
+ * Returns the messages with tool responses inserted but WITHOUT cleaning for LLM
+ * The cleaning should be done separately to avoid double-processing
  */
-export function insertCachedToolResponses(messages: any[], options?: { 
-  prependUserId?: boolean; 
-  userId?: string;
-  prependCommunicationMode?: boolean;
-}): any[] {
+export function insertCachedToolResponses(messages: any[]): any[] {
   const processedMessages = [...messages];
   let insertedCount = 0;
   
@@ -313,6 +364,6 @@ export function insertCachedToolResponses(messages: any[], options?: {
     });
   }
   
-  // Clean all messages for LLM compatibility before returning, with user ID prefixing support
-  return cleanMessagesForLLM(processedMessages, options);
+  // Return the messages WITHOUT cleaning for LLM - that will be done separately
+  return processedMessages;
 }
