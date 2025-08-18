@@ -1,5 +1,5 @@
 // lib/endpoints/example-endpoint.ts
-// Updated with proper logging system
+// Updated with proper logging system and fixed fromUser for photo sending
 
 import OpenAI from 'openai';
 import type { EndpointConfig } from '../types';
@@ -210,12 +210,19 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     return cooldownMessage;
   }
   
-  // Check environment variables - for RTM chat, use the RTM-specific from user
-  let fromUser = process.env.RTM_FROM_USER;
+  // FIX: Use the correct environment variable for the EXAMPLE endpoint
+  // The pattern is {ENDPOINT}_RTM_FROM_USER, not just RTM_FROM_USER
+  let fromUser = process.env.EXAMPLE_RTM_FROM_USER;
   
   if (!fromUser) {
-    logger.error('RTM_FROM_USER environment variable is not set');
-    return `Failed to send photo: Missing RTM_FROM_USER configuration.`;
+    logger.error('EXAMPLE_RTM_FROM_USER environment variable is not set');
+    // Fallback to check the old variable name for backwards compatibility
+    fromUser = process.env.RTM_FROM_USER;
+    if (fromUser) {
+      logger.warn('Using deprecated RTM_FROM_USER variable. Please update to EXAMPLE_RTM_FROM_USER');
+    } else {
+      return `Failed to send photo: Missing EXAMPLE_RTM_FROM_USER configuration.`;
+    }
   }
   
   if (!appId) {
@@ -232,7 +239,8 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     photo: selectedPhoto,
     index: randomIndex + 1,
     total: PHOTO_OPTIONS.length,
-    url: imageUrl
+    url: imageUrl,
+    fromUser: fromUser  // Log which user is sending
   });
   
   // Mark photo as sent BEFORE attempting to send (prevents race conditions)
@@ -251,7 +259,11 @@ async function send_photo(appId: string, userId: string, channel: string, args: 
     let result: string;
     if (success) {
       result = `Sending you a photo! 📸 (${selectedPhoto.replace('.png', '').replace('april_', '').replace('_', ' ')}) - it'll arrive in a moment!`;
-      toolLogger.info(`Photo sent successfully`, { userId, photo: selectedPhoto });
+      toolLogger.info(`Photo sent successfully`, { 
+        userId, 
+        photo: selectedPhoto,
+        fromUser: fromUser 
+      });
     } else {
       result = `We encountered an issue scheduling the photo. Please try again later.`;
       toolLogger.warn(`Photo send failed`, { userId });
@@ -300,6 +312,14 @@ logger.info('Example endpoint initialized', {
   photoOptions: PHOTO_OPTIONS,
   photoRateLimitMs: PHOTO_RATE_LIMIT_MS
 });
+
+// Log the environment variable being used for fromUser
+const configuredFromUser = process.env.EXAMPLE_RTM_FROM_USER || process.env.RTM_FROM_USER;
+if (configuredFromUser) {
+  logger.info('Photo sender configured', { fromUser: configuredFromUser });
+} else {
+  logger.warn('Photo sender not configured - EXAMPLE_RTM_FROM_USER environment variable missing');
+}
 
 // Export the complete endpoint configuration with communication modes
 export const exampleEndpointConfig: EndpointConfig = {

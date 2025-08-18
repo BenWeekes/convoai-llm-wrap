@@ -8,10 +8,10 @@ import { cacheLogger as logger } from './logger';
 // Configuration options
 export const CONFIG = {
   // Logging configuration (now controlled by LOG_LEVEL env var)
-  enableDetailedResponseLogging: false, // Set to false by default for quieter logs
+  enableDetailedResponseLogging: true, // Set to false by default for quieter logs
   enableLLMRequestLogging: true,       // Log what's sent to LLM
   enableLLMResponseLogging: true,      // Log what LLM responds with
-  enableStreamingChunkLogging: false,  // Log individual streaming chunks (very verbose)
+  enableStreamingChunkLogging: true,  // Log individual streaming chunks (very verbose)
   enableModeTransitionLogging: true,   // Log communication mode changes
   enableConversationLogging: true,     // Log conversation context and mode analysis
   enableRTMMessageLogging: true,       // Log RTM message processing
