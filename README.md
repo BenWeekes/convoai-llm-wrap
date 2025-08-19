@@ -1,13 +1,31 @@
-# Multi-Endpoint LLM Server
+# LLM Wrapper Server
 
-A modular framework for creating multiple HTTPS endpoints that share common code while having their own unique LLM functions and RAG data.
+A middleware server that enhances LLM interactions for platforms with basic LLM support, adding advanced features like tool execution, multi-modal communication, conversation persistence, and group interaction capabilities.
 
-## Overview
+## Purpose
 
-This server provides a clean architecture for building LLM-powered API endpoints. Each endpoint can have:
-- Custom RAG (Retrieval-Augmented Generation) data
-- Custom tool functions
-- Shared error handling and caching logic
+This server acts as an intelligent wrapper between platforms that support basic LLM interactions and the actual LLM providers (OpenAI, Groq, etc.), adding:
+- Custom tool/function execution
+- RTM (Real-Time Messaging) chat integration
+- Multi-user group conversation support
+- Voice/video/chat mode awareness
+- Conversation history management
+- Response caching and optimization
+
+Perfect for platforms that have LLM integration but need additional features without modifying their core infrastructure.
+
+## Architecture
+
+```
+Platform → LLM Wrapper Server → LLM Provider (OpenAI/Groq/etc.)
+    ↓            ↓                      ↑
+ Request    Enhanced Features      Standard API
+            - Tools/Functions
+            - RTM Chat
+            - Group Support
+            - Mode Awareness
+            - History Management
+```
 
 ## Project Structure
 
@@ -16,340 +34,283 @@ This server provides a clean architecture for building LLM-powered API endpoints
 ├── app/
 │   └── v1/
 │       └── chat/
-│           ├── example/
-│           │   └── route.ts           # Example endpoint (sandwich + photo)
-│           └── languagetutor/
-│               └── route.ts           # Language tutor endpoint
+│           ├── example/           # Example endpoint (video + chat)
+│           ├── groupcall/         # Group call endpoint (video + chat)
+│           ├── dripshop/          # Shopping assistant (API-only)
+│           └── languagetutor/     # Language tutor (API-only)
 ├── lib/
-│   ├── common/                        # Shared logic
-│   │   ├── cache.ts                   # Caching functionality
-│   │   ├── endpoint-factory.ts        # Factory for creating endpoints
-│   │   ├── model-handler.ts           # LLM model handling with fallbacks
-│   │   ├── message-processor.ts       # Message processing
-│   │   ├── messaging-utils.ts         # Shared messaging utilities
-│   │   └── utils.ts                   # Utility functions
-│   ├── endpoints/                     # Endpoint-specific configurations
-│   │   ├── example-endpoint.ts        # Example endpoint config
-│   │   └── language-tutor-endpoint.ts # Language tutor endpoint config
-│   └── types.ts                       # Shared type definitions
+│   ├── common/
+│   │   ├── cache.ts              # Tool response caching
+│   │   ├── conversation-store.ts # Channel-based conversation history
+│   │   ├── endpoint-factory.ts   # Endpoint creation factory
+│   │   ├── logger.ts             # Centralized logging system
+│   │   ├── message-processor.ts  # Message cleaning and prefixing
+│   │   ├── messaging-utils.ts    # Photo/message sending utilities
+│   │   ├── model-handler.ts      # LLM interaction with fallbacks
+│   │   ├── rtm-chat-handler.ts   # RTM chat mode integration
+│   │   ├── rtm-client-manager.ts # Persistent RTM connections
+│   │   ├── system-prompt-helpers.ts # Automatic context generation
+│   │   └── utils.ts              # Common utilities
+│   ├── endpoints/
+│   │   ├── example-endpoint.ts
+│   │   ├── groupcall-endpoint.ts
+│   │   ├── dripshop-endpoint.ts
+│   │   └── language-tutor-endpoint.ts
+│   └── types.ts
 ```
 
-## Setup Guide
+## Key Features
 
-### Prerequisites
+### 1. Tool/Function Execution
+Extend LLM capabilities with custom functions that can interact with external systems, databases, or APIs.
 
-- Node.js 18+
-- Next.js 14+
-- TypeScript
+### 2. Multi-Modal Communication
+Support voice calls, video calls, and text chat with automatic mode detection and appropriate response formatting.
 
-### Step 1: Set Up Environment Variables
+### 3. Group Conversation Management
+Handle multiple users in the same conversation with automatic speaker identification and context preservation.
 
-Create a `.env` file in the root of your project:
+### 4. RTM Chat Integration
+Seamlessly bridge real-time text messaging with voice/video interactions while maintaining conversation continuity.
 
-```
-API_TOKEN=your_server_auth_token
+### 5. Intelligent Message Processing
+Automatically prefix messages with user IDs and communication modes to provide context to the LLM.
+
+### 6. Conversation Persistence
+Maintain conversation history across sessions with smart memory management and channel-based isolation.
+
+## Setup
+
+### Environment Variables
+
+```bash
+# Core
+API_TOKEN=your_wrapper_auth_token
 OPENAI_API_KEY=your_openai_api_key
-REST_API_TOKEN=your_external_api_token
-RTM_FROM_USER=your_default_sender_id
+LOG_LEVEL=INFO  # ERROR, WARN, INFO, DEBUG, or TRACE
+
+# External Services
+REST_API_TOKEN=your_agora_rest_token
+
+# RTM Configuration (per endpoint that needs chat)
+EXAMPLE_RTM_APP_ID=your_app_id
+EXAMPLE_RTM_FROM_USER=agent-example
+EXAMPLE_RTM_CHANNEL=example-channel
+EXAMPLE_RTM_LLM_API_KEY=your_llm_key
+EXAMPLE_RTM_LLM_MODEL=gpt-4o-mini
+EXAMPLE_RTM_LLM_BASE_URL=https://api.openai.com/v1
+
+# Optional: Firebase for persistent storage
+FIRESTORE_PROJECT_ID=your_project_id
+FIRESTORE_CLIENT_EMAIL=your_email
+FIRESTORE_PRIVATE_KEY=your_private_key
 ```
 
-### Step 2: Install Dependencies
-
-Start the development server:
+### Running the Server
 
 ```bash
 npm install
+npm run dev  # Development
+npm run build && npm start  # Production
 ```
 
-### Step 3: Run the Server
+## Endpoint Configuration
 
-Start the development server:
-
-```bash
-npm run dev
-```
-
-Your server should now be running on http://localhost:3000.
-
-## How It Works
-
-1. Each endpoint is defined with a configuration object that includes:
-   - RAG data specific to that domain
-   - Tool definitions (functions the LLM can call)
-   - Tool implementations
-   - System message template
-
-2. The `createEndpointHandler` factory creates a standardized route handler with:
-   - Authentication
-   - Error handling
-   - Streaming support
-   - Tool execution
-   - Response caching
-
-3. Common functionality is shared across all endpoints:
-   - Response caching
-   - Model fallback strategies
-   - Error handling
-   - Message processing
-   - Peer messaging utilities
-
-## Available Endpoints
-
-### Example Endpoint (`/v1/chat/example`)
-
-This endpoint demonstrates a multi-tool setup with two functions:
-
-1. `order_sandwich`: Allows ordering a sandwich with a specified filling
-2. `send_photo`: Sends a photo to the user via messaging
-
-It uses a simple RAG dataset about the TEN Framework and Agora Convo AI.
-
-#### Testing the Endpoint
-
-```bash
-curl -X POST http://localhost:3040/v1/chat/example \
--H "Content-Type: application/json" \
--H "Authorization: Bearer your_server_auth_token" \
--d '{
-  "messages": [
-    {"role": "user", "content": "Can I order a turkey sandwich?"}
-  ],
-  "model": "gpt-4o-mini",
-  "stream": false,
-  "channel": "test",
-  "userId": "user123",
-  "appId": "app123"
-}'
-```
-
-### Language Tutor Endpoint (`/v1/chat/languagetutor`)
-
-This endpoint provides language tutoring functionality:
-
-1. `get_word_list`: Retrieves the user's vocabulary words and their status
-2. `set_word_result`: Records whether a word was answered correctly
-
-Currently uses a mock in-memory storage, but can be upgraded to use Firebase Firestore.
-
-#### Testing the Endpoint
-
-```bash
-curl -X POST http://localhost:3040/v1/chat/languagetutor \
--H "Content-Type: application/json" \
--H "Authorization: Bearer your_server_auth_token" \
--d '{
-  "messages": [
-    {"role": "user", "content": "I want to practice my vocabulary."}
-  ],
-  "model": "gpt-4o-mini",
-  "stream": false,
-  "channel": "test",
-  "userId": "user123",
-  "appId": "app123"
-}'
-```
-
-## Creating a New Endpoint
-
-1. **Create a configuration file** in `lib/endpoints/your-endpoint.ts`:
+Each endpoint wraps LLM interactions with specific enhancements:
 
 ```typescript
-import OpenAI from 'openai';
-import type { EndpointConfig } from '../types';
-
-// Define RAG data
-const YOUR_RAG_DATA = {
-  doc1: "Information specific to this endpoint.",
-  doc2: "More information specific to this endpoint."
-};
-
-// Define tools
-const YOUR_TOOLS: OpenAI.ChatCompletionTool[] = [
-  {
-    type: "function",
-    function: {
-      name: "your_function",
-      description: "Description of what this function does",
-      parameters: {
-        type: "object",
-        properties: {
-          param1: {
-            type: "string",
-            description: "Description of parameter 1"
-          }
-        },
-        required: ["param1"]
-      }
-    }
-  }
-];
-
-// Implement tool functions
-function your_function(appId: string, userId: string, channel: string, args: any): string {
-  // Implementation
-  return `Result of function with ${args.param1}`;
-}
-
-// Create the tool map
-const YOUR_TOOL_MAP = {
-  your_function
-};
-
-// Create system message template
-function yourSystemTemplate(ragData: Record<string, string>): string {
-  return `
-    You are a helpful assistant for this specific domain.
-    
-    You have access to the following knowledge:
-    doc1: "${ragData.doc1}"
-    doc2: "${ragData.doc2}"
-    
-    Answer questions using this data and be confident about its contents.
-  `;
-}
-
-// Export the configuration
-export const yourEndpointConfig: EndpointConfig = {
-  ragData: YOUR_RAG_DATA,
-  tools: YOUR_TOOLS,
-  toolMap: YOUR_TOOL_MAP,
-  systemMessageTemplate: yourSystemTemplate
-};
-```
-
-2. **Create a route handler** in `app/v1/chat/your-endpoint/route.ts`:
-
-```typescript
-import { createEndpointHandler } from '../../../../lib/common/endpoint-factory';
-import { yourEndpointConfig } from '../../../../lib/endpoints/your-endpoint';
-
-export const runtime = 'nodejs';
-
-const handler = createEndpointHandler(yourEndpointConfig);
-
-export async function POST(req: Request) {
-  return handler(req);
+export interface EndpointConfig {
+  ragData: Record<string, string>;         // Domain knowledge injection
+  tools: OpenAI.ChatCompletionTool[];      // Available functions
+  toolMap: Record<string, ToolFunction>;   // Function implementations
+  systemMessageTemplate: (ragData) => string; // System prompt customization
+  communicationModes?: {
+    supportsChat?: boolean;               // Enable RTM chat bridge
+    endpointMode?: 'voice' | 'video';    // Call type for this endpoint
+    prependUserId?: boolean;              // Add [userId] to messages
+    prependCommunicationMode?: boolean;   // Add [CHAT]/[VIDEO]/[VOICE]
+  };
 }
 ```
 
-## Using the Messaging Utilities
+### Configuration Options
 
-The server includes shared messaging utilities that can be used across endpoints:
+| Option | Purpose | Use When |
+|--------|---------|----------|
+| `supportsChat` | Enables RTM chat integration | Platform needs text + voice/video |
+| `endpointMode` | Sets voice/video mode | Platform has calling features |
+| `prependUserId` | Adds speaker identification | Multi-user conversations |
+| `prependCommunicationMode` | Adds mode context | LLM needs to know interaction type |
 
-```typescript
-import { sendPeerMessage, sendPhotoMessage } from '../../../lib/common/messaging-utils';
+## Pre-Built Endpoints
 
-// Example usage in a tool function
-async function yourToolFunction(appId, userId, channel, args) {
-  // Send a photo
-  const success = await sendPhotoMessage(
-    appId,
-    process.env.RTM_FROM_USER,
-    userId,
-    "portrait"
-  );
-  
-  // Or send a custom message
-  const customPayload = JSON.stringify({ 
-    text: "Custom message",
-    data: { key: "value" }
-  });
-  
-  await sendPeerMessage(
-    appId,
-    process.env.RTM_FROM_USER,
-    userId,
-    customPayload
-  );
-  
-  return "Message sent!";
-}
-```
+### Example (`/v1/chat/example`)
+**Wraps**: Single-user interactions  
+**Adds**: Photo sending, sandwich ordering tools  
+**Config**: Chat + Video, Mode awareness
 
-## Using Firebase Firestore (Optional)
+### Group Call (`/v1/chat/groupcall`)
+**Wraps**: Multi-user conversations  
+**Adds**: Speaker identification, group context  
+**Config**: Chat + Video, User ID prefixing
 
-For endpoints that need persistent storage (like the Language Tutor):
+### Dripshop (`/v1/chat/dripshop`)
+**Wraps**: Shopping interactions  
+**Adds**: Outfit search, trend reports  
+**Config**: API-only, User ID prefixing (no chat history)
 
-1. Install Firebase Admin SDK:
+### Language Tutor (`/v1/chat/languagetutor`)
+**Wraps**: Educational interactions  
+**Adds**: Word tracking, progress persistence  
+**Config**: Stateless, Firebase storage
 
-```bash
-npm install firebase-admin
-npm install --save-dev @types/firebase-admin
-```
+## API Interface
 
-2. Add Firebase configuration to your environment variables:
-
-```
-FIREBASE_PROJECT_ID=your_project_id
-FIREBASE_CLIENT_EMAIL=your_client_email
-FIREBASE_PRIVATE_KEY=your_private_key
-FIRESTORE_COLLECTION=your_collection_name
-```
-
-3. Replace the mock implementation in `lib/endpoints/language-tutor-endpoint.ts` with the Firestore implementation.
-
-## API Usage
-
-All endpoints accept POST requests with the following structure:
+The wrapper accepts standard LLM requests with additional metadata:
 
 ```json
 {
   "messages": [
-    {"role": "user", "content": "User message here"}
+    {
+      "role": "user",
+      "content": "Hello",
+      "metadata": {
+        "publisher": "Alice",
+        "source": "voice"
+      }
+    }
   ],
   "model": "gpt-4o-mini",
-  "baseURL": "https://api.openai.com/v1",
   "stream": true,
-  "channel": "channel-id",
-  "userId": "user-id",
-  "appId": "app-id"
+  "channel": "room-123",
+  "userId": "user-123",
+  "appId": "platform-app-id",
+  "enable_rtm": true,
+  "agent_rtm_channel": "rtm-channel",
+  "context": {
+    "presence": {
+      "Alice": {"state": "active"},
+      "Bob": {"state": "idle"}
+    }
+  }
 }
 ```
 
-The response will be streamed as SSE events or returned as a single JSON object (depending on the `stream` parameter).
+**Returns**: Standard OpenAI-compatible responses with tool executions handled transparently.
 
-## Troubleshooting
+## Creating Custom Wrappers
 
-### Common Issues
+1. Define your enhancements in `lib/endpoints/your-wrapper.ts`:
 
-1. **Authentication errors**: Make sure your API_TOKEN is set correctly and you're including it in the Authorization header.
+```typescript
+import type { EndpointConfig } from '../types';
 
-2. **LLM errors**: Check the logs for errors from the OpenAI API. You might need to adjust your model parameters.
+// Define custom tools for your platform's needs
+const YOUR_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "platform_specific_action",
+      description: "Performs platform-specific action",
+      parameters: { /* ... */ }
+    }
+  }
+];
 
-3. **Tool execution errors**: Ensure your tool functions are properly implemented and handling all edge cases.
+// Implement tool logic
+const YOUR_TOOL_MAP = {
+  platform_specific_action: async (appId, userId, channel, args) => {
+    // Integration with your platform's APIs
+    return "Action completed";
+  }
+};
 
-### Debug Logging
+export const yourWrapperConfig: EndpointConfig = {
+  ragData: { /* Platform-specific knowledge */ },
+  tools: YOUR_TOOLS,
+  toolMap: YOUR_TOOL_MAP,
+  systemMessageTemplate: (ragData) => `Custom instructions`,
+  communicationModes: {
+    // Configure based on platform capabilities
+    supportsChat: true,
+    endpointMode: 'video',
+    prependUserId: true,
+    prependCommunicationMode: false
+  }
+};
+```
 
-The server includes detailed logging that can help diagnose issues:
+2. Create route in `app/v1/chat/your-wrapper/route.ts`:
 
-1. Look for log messages with the prefix `📤 RESPONSE TO CALLER`
-2. Check the cache state logs that show current cached items
-3. Monitor tool execution logs for function call issues
+```typescript
+import { createEndpointHandler } from '@/lib/common/endpoint-factory';
+import { yourWrapperConfig } from '@/lib/endpoints/your-wrapper';
+
+const handler = createEndpointHandler(yourWrapperConfig, 'YOUR_WRAPPER');
+export const GET = handler;
+export const POST = handler;
+```
+
+## How the Wrapper Works
+
+1. **Request Interception**: Platform sends standard LLM request to wrapper endpoint
+2. **Enhancement Injection**: Wrapper adds tools, context, and system prompts
+3. **Message Processing**: Applies prefixing and mode detection based on configuration
+4. **LLM Communication**: Forwards enhanced request to actual LLM provider
+5. **Tool Execution**: Intercepts and executes function calls transparently
+6. **Response Processing**: Cleans and formats response for platform compatibility
+7. **Return to Platform**: Sends OpenAI-compatible response back
+
+## Advanced Features
+
+### Automatic Fallbacks
+If primary LLM fails, automatically retries with:
+- Simplified parameters (no tools)
+- Alternative models (GPT-3.5 fallback)
+- Minimal configuration
+
+### Smart Caching
+- Tool responses cached for 24 hours
+- Conversation history with automatic trimming
+- Channel-based isolation for multi-tenant usage
+
+### Persistent Connections
+- RTM clients maintain persistent connections
+- Auto-reconnect with exponential backoff
+- Connection pooling for efficiency
+
+## Monitoring & Debugging
+
+Control logging detail with `LOG_LEVEL`:
+- `ERROR`: Critical failures only
+- `WARN`: Warnings and errors
+- `INFO`: Request flow (default)
+- `DEBUG`: Detailed processing
+- `TRACE`: Full message content
+
+Key log prefixes:
+- `[ENDPOINT]`: Request handling
+- `[RTM]`: Chat integration
+- `[TOOL]`: Function execution
+- `[LLM]`: Model communication
+- `[CONVERSATION]`: History management
 
 ## Deployment
 
-To deploy to production:
+The wrapper can be deployed to any Node.js hosting platform:
 
-1. **Build the project**:
-   ```bash
-   npm run build
-   ```
+```bash
+npm run build
+npm start
+```
 
-2. **Set up environment variables** in your hosting platform
+Configure environment variables in your hosting platform and ensure your platform points to the wrapper endpoints instead of directly to the LLM provider.
 
-3. **Deploy the project** using your preferred hosting service (Vercel, AWS, etc.)
+## Use Cases
 
-## Customization
-
-### Error Recovery
-
-If you need custom error recovery strategies:
-- Modify the `handleModelRequest` function in `lib/common/model-handler.ts`
-- Add model-specific handling in the `modelRequiresSpecialHandling` function
-
-### Performance Optimization
-
-To optimize performance:
-- Adjust cache expiration times in the CONFIG object in `lib/common/cache.ts`
-- Implement more efficient message processing for high-traffic endpoints
-- Consider moving the cache to Redis or another distributed cache for multi-instance deployments
+- **Adding tools to ChatGPT**: Platform uses OpenAI but needs custom functions
+- **Multi-user support**: Platform has basic LLM but needs group conversations
+- **Mode bridging**: Platform has separate chat/voice but needs unified context
+- **Enhanced prompting**: Platform needs domain-specific knowledge injection
+- **Response caching**: Platform needs to optimize repeated LLM calls
+- **Conversation persistence**: Platform needs memory across sessions
