@@ -1,6 +1,6 @@
 // lib/common/endpoint-factory.ts
 // Factory function to create standardized endpoint handlers
-// Updated with proper logging system and fixed duplicate logging issues
+// IMPROVED: Better request logging and reduced duplicate prefix logs
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
@@ -118,7 +118,8 @@ async function executeToolCall(
     const cleanedMessages = cleanMessagesForLLM(updatedMessages, {
       prependUserId: shouldPrepend,
       userId: shouldPrepend ? userId : undefined,
-      prependCommunicationMode: shouldPrependMode
+      prependCommunicationMode: shouldPrependMode,
+      suppressLogs: true // Suppress logs for tool execution to reduce noise
     });
     
     // Make final streaming request
@@ -268,7 +269,76 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       if (req.method === 'POST') {
         try {
           body = await req.json();
-          logger.trace("Request body received", body);
+          
+          // IMPROVED REQUEST LOGGING
+          logger.info(`[${endpointName || 'UNKNOWN'}] Request received`, {
+            endpoint: endpointName,
+            method: req.method,
+            messagesCount: body.messages?.length || 0,
+            model: body.model || 'default',
+            stream: body.stream !== false,
+            userId: body.userId,
+            appId: body.appId,
+            channel: body.channel,
+            turn_id: body.turn_id,
+            timestamp: body.timestamp,
+            interruptable: body.interruptable,
+            enable_rtm: body.enable_rtm || false,
+            agent_rtm_channel: body.agent_rtm_channel,
+            hasContext: !!body.context
+          });
+          
+          // Log presence information if available
+          if (body.context?.presence) {
+            const presenceUsers = Object.keys(body.context.presence);
+            logger.info(`[${endpointName}] Presence information`, {
+              totalUsers: presenceUsers.length,
+              users: presenceUsers,
+              presenceDetails: JSON.stringify(body.context.presence, null, 2)
+            });
+          }
+          
+          // Log first 3 and last 3 messages for context
+          if (body.messages && Array.isArray(body.messages)) {
+            const msgCount = body.messages.length;
+            const messageSummary: any[] = [];
+            
+            // First 3 messages
+            for (let i = 0; i < Math.min(3, msgCount); i++) {
+              const msg = body.messages[i];
+              messageSummary.push({
+                index: i,
+                role: msg.role,
+                contentPreview: msg.content ? msg.content.substring(0, 100) : '[no content]',
+                metadata: msg.metadata,
+                turn_id: msg.turn_id,
+                timestamp: msg.timestamp
+              });
+            }
+            
+            // Add ellipsis if more than 6 messages
+            if (msgCount > 6) {
+              messageSummary.push({ note: `... ${msgCount - 6} more messages ...` });
+            }
+            
+            // Last 3 messages (if different from first 3)
+            if (msgCount > 3) {
+              for (let i = Math.max(3, msgCount - 3); i < msgCount; i++) {
+                const msg = body.messages[i];
+                messageSummary.push({
+                  index: i,
+                  role: msg.role,
+                  contentPreview: msg.content ? msg.content.substring(0, 100) : '[no content]',
+                  metadata: msg.metadata,
+                  turn_id: msg.turn_id,
+                  timestamp: msg.timestamp
+                });
+              }
+            }
+            
+            logger.debug(`[${endpointName}] Message summary`, messageSummary);
+          }
+          
         } catch (jsonError) {
           logger.error('Failed to parse JSON body', jsonError);
           const errorResponse = { error: 'Invalid JSON in request body' };
@@ -297,7 +367,9 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         enable_rtm = false,
         agent_rtm_uid = '',
         agent_rtm_token = '',
-        agent_rtm_channel = ''
+        agent_rtm_channel = '',
+        // Context parameters
+        context = null
       } = body;
 
       // Check prefixing configuration
@@ -529,11 +601,17 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
       }
 
       // CLEAN MESSAGES FOR LLM COMPATIBILITY BEFORE SENDING
+      // Log summary once before cleaning
+      if (shouldPrepend) {
+        logger.info(`[${endpointName}] Processing ${finalMessages.filter(m => m.role === 'user').length} user messages with ID prefixing enabled`);
+      }
+      
       const cleanedFinalMessages = cleanMessagesForLLM(finalMessages, {
         prependUserId: shouldPrepend,
         userId: shouldPrepend ? userId : undefined,
         prependCommunicationMode: shouldPrependMode,
-        endpoint: endpointName // Pass endpoint name for better logging
+        endpoint: endpointName, // Pass endpoint name for better logging
+        suppressLogs: true // Suppress individual message logs
       });
 
       // Common request parameters

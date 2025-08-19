@@ -1,5 +1,5 @@
 // File: lib/common/utils.ts
-// Updated with proper logging system
+// Updated with improved response logging that shows actual content
 
 import OpenAI from 'openai';
 import { CONFIG } from './cache';
@@ -65,7 +65,53 @@ export function extractCommands(text: string): { extractedCommands: string[], cl
 }
 
 /**
+ * Helper to format stream chunk data for better logging
+ */
+function formatStreamChunk(item: any): any {
+  if (item.type === 'content_stream' && item.data) {
+    const data = item.data;
+    if (data.choices && data.choices[0] && data.choices[0].delta) {
+      const delta = data.choices[0].delta;
+      return {
+        type: 'content_stream',
+        content: delta.content || '[no content]',
+        role: delta.role,
+        hasToolCalls: !!delta.tool_calls,
+        finishReason: data.choices[0].finish_reason
+      };
+    }
+  } else if (item.type === 'tool_execution') {
+    return {
+      type: 'tool_execution',
+      tool: item.tool_name,
+      args: item.arguments,
+      resultPreview: item.result ? item.result.substring(0, 100) : '[no result]'
+    };
+  } else if (item.type === 'tool_stream' && item.data) {
+    const data = item.data;
+    if (data.choices && data.choices[0] && data.choices[0].delta && data.choices[0].delta.tool_calls) {
+      const toolCalls = data.choices[0].delta.tool_calls;
+      return {
+        type: 'tool_stream',
+        toolCalls: toolCalls.map((tc: any) => ({
+          name: tc.function?.name,
+          argsFragment: tc.function?.arguments ? tc.function.arguments.substring(0, 50) : undefined
+        }))
+      };
+    }
+  }
+  
+  // For other types, return a simplified version
+  return {
+    type: item.type || 'unknown',
+    hasData: !!item.data,
+    marker: item.marker
+  };
+}
+
+/**
  * Logs the full response in a nice, boxed format if detailed logging is enabled
+ * IMPROVED to show actual content instead of [Object]
  */
 export function logFullResponse(type: string, data: any): void {
   // Skip detailed logging if disabled
@@ -77,28 +123,101 @@ export function logFullResponse(type: string, data: any): void {
 
   utilLogger.debug(`📤 RESPONSE TO CALLER (${type})`, { type });
   
-  // Extract and log tool-related items first if present
+  // Handle array responses (streaming)
   if (Array.isArray(data)) {
+    // Extract and log tool-related items first if present
     const toolItems = data.filter(item => 
       item.type === "tool_execution" || 
+      item.type === "tool_stream" ||
       (item.data && item.data.choices && item.data.choices[0] && item.data.choices[0].delta && item.data.choices[0].delta.tool_calls) ||
       (item.data && item.data.choices && item.data.choices[0] && item.data.choices[0].tool_calls)
     );
     
     if (toolItems.length > 0) {
-      utilLogger.debug(`Tool-related responses`, { count: toolItems.length, items: toolItems });
+      const formattedTools = toolItems.map(formatStreamChunk);
+      utilLogger.debug(`Tool-related responses`, { 
+        count: toolItems.length, 
+        items: formattedTools 
+      });
     }
-  }
-  
-  // Then log the complete response
-  if (Array.isArray(data)) {
+    
+    // Format all items for better visibility
+    const formattedItems = data.map(formatStreamChunk);
+    
+    // Group consecutive content_stream items for cleaner logging
+    const groupedItems: any[] = [];
+    let currentContentGroup: string[] = [];
+    
+    for (const item of formattedItems) {
+      if (item.type === 'content_stream' && item.content && item.content !== '[no content]') {
+        currentContentGroup.push(item.content);
+      } else {
+        // Flush current content group if exists
+        if (currentContentGroup.length > 0) {
+          groupedItems.push({
+            type: 'content_group',
+            chunks: currentContentGroup.length,
+            combinedContent: currentContentGroup.join('').substring(0, 200) + 
+                           (currentContentGroup.join('').length > 200 ? '...' : '')
+          });
+          currentContentGroup = [];
+        }
+        // Add non-content item
+        if (item.type !== 'content_stream' || item.content === '[no content]') {
+          groupedItems.push(item);
+        }
+      }
+    }
+    
+    // Flush any remaining content group
+    if (currentContentGroup.length > 0) {
+      groupedItems.push({
+        type: 'content_group',
+        chunks: currentContentGroup.length,
+        combinedContent: currentContentGroup.join('').substring(0, 200) + 
+                       (currentContentGroup.join('').length > 200 ? '...' : '')
+      });
+    }
+    
     utilLogger.debug(`Complete response array`, { 
       itemCount: data.length,
-      preview: data.length > 20 ? 'truncated' : 'full',
-      items: data.length > 20 ? [...data.slice(0, 5), '...', ...data.slice(-5)] : data
+      groupedItemCount: groupedItems.length,
+      items: groupedItems
     });
   } else {
-    utilLogger.debug(`Complete response`, data);
+    // Non-array response - format it nicely
+    if (data.choices && Array.isArray(data.choices)) {
+      // Format OpenAI response
+      const formattedResponse = {
+        model: data.model,
+        usage: data.usage,
+        choices: data.choices.map((choice: any) => ({
+          index: choice.index,
+          finishReason: choice.finish_reason,
+          message: {
+            role: choice.message?.role,
+            contentPreview: choice.message?.content ? 
+              choice.message.content.substring(0, 200) + 
+              (choice.message.content.length > 200 ? '...' : '') : 
+              '[no content]',
+            toolCalls: choice.message?.tool_calls?.map((tc: any) => ({
+              id: tc.id,
+              type: tc.type,
+              function: {
+                name: tc.function?.name,
+                argumentsPreview: tc.function?.arguments ? 
+                  tc.function.arguments.substring(0, 100) : 
+                  '[no arguments]'
+              }
+            }))
+          }
+        }))
+      };
+      utilLogger.debug(`Complete response`, formattedResponse);
+    } else {
+      // Other response types
+      utilLogger.debug(`Complete response`, data);
+    }
   }
 }
 
@@ -122,6 +241,7 @@ export function validateToken(authHeader: string | null, expectedToken: string):
 
 /**
  * Logs LLM request details with communication mode context
+ * IMPROVED to show actual message content
  */
 export function logLLMRequest(requestParams: any, context: {
   userId: string;
@@ -148,19 +268,32 @@ export function logLLMRequest(requestParams: any, context: {
     }
   });
   
-  // Log message summary if trace level
-  if (requestParams.messages) {
+  // Log message details with better formatting
+  if (requestParams.messages && process.env.LOG_LEVEL === 'TRACE') {
     const messageSummary = requestParams.messages.map((msg: any, index: number) => {
-      const truncatedContent = msg.content ? 
-        (msg.content.length > 200 ? msg.content.substring(0, 200) + '...' : msg.content) : 
-        '[no content]';
+      // Extract user ID from content if present
+      let displayContent = msg.content || '[no content]';
+      let extractedUserId = null;
+      
+      if (msg.role === 'user' && displayContent.startsWith('[')) {
+        const match = displayContent.match(/^\[([^\]]+)\]\s*(.*)/);
+        if (match) {
+          extractedUserId = match[1];
+          displayContent = match[2];
+        }
+      }
+      
+      const truncatedContent = displayContent.length > 200 ? 
+        displayContent.substring(0, 200) + '...' : 
+        displayContent;
       
       return {
         index,
         role: msg.role,
+        userId: extractedUserId,
         contentLength: msg.content?.length || 0,
         hasToolCalls: !!msg.tool_calls,
-        preview: truncatedContent.substring(0, 50)
+        preview: truncatedContent.substring(0, 100)
       };
     });
     
@@ -206,6 +339,7 @@ export function logLLMResponse(response: any, context: {
       
       if (choice.message?.content) {
         responseData.contentLength = choice.message.content.length;
+        responseData.contentPreview = choice.message.content.substring(0, 200);
         
         // Analyze content for mode-related keywords
         const content = choice.message.content.toLowerCase();
@@ -225,8 +359,8 @@ export function logLLMResponse(response: any, context: {
       
       llmLogger.debug('LLM Response Complete', responseData);
       
-      if (choice.message?.content) {
-        llmLogger.trace('Response content', choice.message.content);
+      if (choice.message?.content && process.env.LOG_LEVEL === 'TRACE') {
+        llmLogger.trace('Full response content', choice.message.content);
       }
     }
   }
@@ -234,6 +368,7 @@ export function logLLMResponse(response: any, context: {
 
 /**
  * Logs streaming chunk details with mode context
+ * Reduced verbosity for cleaner logs
  */
 export function logStreamingChunk(chunk: any, context: {
   userId: string;
@@ -244,42 +379,35 @@ export function logStreamingChunk(chunk: any, context: {
 }): void {
   if (!CONFIG.enableStreamingChunkLogging) return;
 
-  const chunkData: any = {
-    userId: context.userId,
-    index: context.chunkIndex
-  };
-  
-  if (context.hasToolCalls) {
-    const delta = chunk.choices?.[0]?.delta;
-    if (delta?.tool_calls) {
-      chunkData.toolCalls = delta.tool_calls.map((call: any, i: number) => ({
-        index: i,
-        name: call.function?.name,
-        hasArgs: !!call.function?.arguments
-      }));
-    }
-    llmLogger.trace('Stream chunk with tool calls', chunkData);
-  }
-  
-  if (context.hasContent) {
-    const content = chunk.choices?.[0]?.delta?.content || '';
-    chunkData.contentLength = content.length;
-    
-    // Check for mode-related content
-    const contentLower = content.toLowerCase();
-    if (contentLower.includes('video') || contentLower.includes('call') || 
-        contentLower.includes('chat') || contentLower.includes('hang up')) {
-      chunkData.modeRelated = true;
-    }
-    
-    llmLogger.trace('Stream chunk with content', chunkData);
-  }
-  
+  // Only log significant chunks
   if (context.finishReason) {
     llmLogger.debug('Stream finished', { 
       userId: context.userId,
       finishReason: context.finishReason 
     });
+  } else if (context.hasToolCalls) {
+    const delta = chunk.choices?.[0]?.delta;
+    if (delta?.tool_calls) {
+      const toolInfo = delta.tool_calls.map((call: any) => ({
+        name: call.function?.name,
+        hasArgs: !!call.function?.arguments
+      }));
+      llmLogger.trace('Stream chunk with tool calls', {
+        userId: context.userId,
+        index: context.chunkIndex,
+        tools: toolInfo
+      });
+    }
+  } else if (context.hasContent && process.env.LOG_LEVEL === 'TRACE') {
+    // Only log content chunks in TRACE mode
+    const content = chunk.choices?.[0]?.delta?.content || '';
+    if (content.length > 0) {
+      llmLogger.trace('Stream chunk', {
+        userId: context.userId,
+        index: context.chunkIndex,
+        contentLength: content.length
+      });
+    }
   }
 }
 
@@ -334,5 +462,8 @@ export function logRTMMessageProcessing(context: {
   }
   
   llmLogger.debug('RTM message received', messageData);
-  llmLogger.trace('RTM message content', context.messageContent);
+  
+  if (process.env.LOG_LEVEL === 'TRACE') {
+    llmLogger.trace('RTM message content', context.messageContent);
+  }
 }
