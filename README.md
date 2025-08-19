@@ -4,7 +4,7 @@ A middleware server that enhances LLM interactions for platforms with basic LLM 
 
 ## Purpose
 
-This server acts as an intelligent wrapper between platforms that support basic LLM interactions and the actual LLM providers (OpenAI, Groq, etc.), adding:
+This server acts as an intelligent wrapper between Agora's ConvoAI Platform which provides support for basic LLM interactions and the actual LLM providers (OpenAI, Groq, etc.), adding:
 - Custom tool/function execution
 - RTM (Real-Time Messaging) chat integration
 - Multi-user group conversation support
