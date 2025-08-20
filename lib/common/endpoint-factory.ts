@@ -1,6 +1,7 @@
 // lib/common/endpoint-factory.ts
 // Factory function to create standardized endpoint handlers
 // IMPROVED: Better request logging and reduced duplicate prefix logs
+// UPDATED: Skip conversation history for pure API endpoints (supportsChat: false)
 
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
@@ -30,6 +31,15 @@ function shouldPrependCommunicationMode(config: EndpointConfig): boolean {
 }
 
 /**
+ * Helper function to determine if we should skip conversation storage
+ * Skip for pure API endpoints that don't support chat and have an endpoint mode
+ */
+function shouldSkipConversationStore(config: EndpointConfig): boolean {
+  return config.communicationModes?.supportsChat === false && 
+         config.communicationModes?.endpointMode !== undefined;
+}
+
+/**
  * Helper function to execute tool and handle final response
  */
 async function executeToolCall(
@@ -48,7 +58,8 @@ async function executeToolCall(
   rtmClient: any,
   enable_rtm: boolean,
   agent_rtm_channel: string,
-  endpointMode?: string
+  endpointMode?: string,
+  skipConversationStore?: boolean
 ): Promise<void> {
   logger.debug(`Executing tool call - all conditions met`);
   
@@ -372,6 +383,13 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         context = null
       } = body;
 
+      // Check if we should skip conversation storage for this endpoint
+      const skipConversationStore = shouldSkipConversationStore(config);
+      
+      if (skipConversationStore) {
+        logger.info(`[${endpointName}] Skipping conversation store for pure API endpoint`);
+      }
+
       // Check prefixing configuration
       const shouldPrepend = shouldPrependUserId(config);
       const shouldPrependMode = shouldPrependCommunicationMode(config);
@@ -412,7 +430,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         endpointMode: config.communicationModes?.endpointMode || null,
         prependUserId: shouldPrepend,
         prependCommunicationMode: shouldPrependMode,
-        channel
+        channel,
+        skipConversationStore
       });
 
       // Gather RTM parameters
@@ -454,7 +473,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           },
           prepend_user_id: shouldPrepend,
           prepend_communication_mode: shouldPrependMode,
-          channel_based_history: true
+          channel_based_history: !skipConversationStore,
+          skip_conversation_store: skipConversationStore
         });
       }
       
@@ -515,89 +535,110 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           }))
         : requestMessages;
       
-      // Get existing conversation to preserve history
-      const existingConversation = await getOrCreateConversation(appId, userId, channel);
-      logger.debug(`Found existing conversation`, {
-        userId,
-        channel,
-        messageCount: existingConversation.messages.length
-      });
-      
       // Process request messages and insert cached tool responses if needed
-      // Note: insertCachedToolResponses already applies cleanMessagesForLLM internally
-      // So we DON'T pass the prefixing options here to avoid double-processing
       const processedRequestMessages = insertCachedToolResponses(processedMessages);
       
-      // Save the enhanced system message
-      logger.debug(`Managing enhanced system message`, { userId, channel });
-      
-      await saveMessage(appId, userId, channel, {
-        role: 'system',
-        content: systemMessage.content,
-        mode: endpointMode
-      });
-      
-      // Prepare final messages - get the managed conversation
-      const managedConversation = await getOrCreateConversation(appId, userId, channel);
+      // Prepare final messages based on whether we're using conversation store
       let finalMessages: any[];
+      let existingConversationLength = 0;
       
-      // The conversation store has already managed the system message, so we just append new messages
-      const existingMessagesWithoutCurrent = managedConversation.messages.filter(msg => 
-        !(processedRequestMessages.some(reqMsg => 
-          reqMsg.role === msg.role && 
-          reqMsg.content === msg.content && 
-          Math.abs((msg.timestamp || 0) - Date.now()) < 5000
-        ))
-      );
-      
-      finalMessages = [...existingMessagesWithoutCurrent, ...processedRequestMessages];
-      
-      logger.debug(`Final message preparation`, {
-        total: finalMessages.length,
-        existing: existingMessagesWithoutCurrent.length,
-        new: processedRequestMessages.length
-      });
+      if (!skipConversationStore) {
+        // ORIGINAL BEHAVIOR: Use conversation store for endpoints that support chat
+        
+        // Get existing conversation to preserve history
+        const existingConversation = await getOrCreateConversation(appId, userId, channel);
+        existingConversationLength = existingConversation.messages.length;
+        
+        logger.debug(`Found existing conversation`, {
+          userId,
+          channel,
+          messageCount: existingConversation.messages.length
+        });
+        
+        // Save the enhanced system message
+        logger.debug(`Managing enhanced system message`, { userId, channel });
+        
+        await saveMessage(appId, userId, channel, {
+          role: 'system',
+          content: systemMessage.content,
+          mode: endpointMode
+        });
+        
+        // Prepare final messages - get the managed conversation
+        const managedConversation = await getOrCreateConversation(appId, userId, channel);
+        
+        // The conversation store has already managed the system message, so we just append new messages
+        const existingMessagesWithoutCurrent = managedConversation.messages.filter(msg => 
+          !(processedRequestMessages.some(reqMsg => 
+            reqMsg.role === msg.role && 
+            reqMsg.content === msg.content && 
+            Math.abs((msg.timestamp || 0) - Date.now()) < 5000
+          ))
+        );
+        
+        finalMessages = [...existingMessagesWithoutCurrent, ...processedRequestMessages];
+        
+        logger.debug(`Final message preparation with conversation store`, {
+          total: finalMessages.length,
+          existing: existingMessagesWithoutCurrent.length,
+          new: processedRequestMessages.length
+        });
 
-      // Save user messages to conversation with mode information
-      let modeTransitionLogged = false;
-      for (const message of processedRequestMessages) {
-        if (message.role === 'user') {
-          // LOG MODE TRANSITION (only once per request and only if endpoint supports multiple modes)
-          if (!modeTransitionLogged) {
-            // Only log mode transitions if the endpoint supports chat (meaning it can switch modes)
-            // Pure API endpoints with a single mode don't need transition logging
-            const supportsMultipleModes = config.communicationModes?.supportsChat === true;
-            
-            if (supportsMultipleModes) {
-              // Detect previous mode from conversation history
-              const previousUserMessages = managedConversation.messages.filter(msg => 
-                msg.role === 'user' && msg.mode
-              );
-              const previousMode = previousUserMessages.length > 0 
-                ? previousUserMessages[previousUserMessages.length - 1].mode 
-                : undefined;
+        // Save user messages to conversation with mode information
+        let modeTransitionLogged = false;
+        for (const message of processedRequestMessages) {
+          if (message.role === 'user') {
+            // LOG MODE TRANSITION (only once per request and only if endpoint supports multiple modes)
+            if (!modeTransitionLogged) {
+              // Only log mode transitions if the endpoint supports chat (meaning it can switch modes)
+              const supportsMultipleModes = config.communicationModes?.supportsChat === true;
               
-              // Only log if there's an actual transition
-              if (!previousMode || previousMode !== endpointMode) {
-                logModeTransition({
-                  userId,
-                  appId,
-                  fromMode: previousMode,
-                  toMode: endpointMode || 'unspecified',
-                  channel,
-                  trigger: 'api_call'
-                });
+              if (supportsMultipleModes) {
+                // Detect previous mode from conversation history
+                const previousUserMessages = managedConversation.messages.filter(msg => 
+                  msg.role === 'user' && msg.mode
+                );
+                const previousMode = previousUserMessages.length > 0 
+                  ? previousUserMessages[previousUserMessages.length - 1].mode 
+                  : undefined;
+                
+                // Only log if there's an actual transition
+                if (!previousMode || previousMode !== endpointMode) {
+                  logModeTransition({
+                    userId,
+                    appId,
+                    fromMode: previousMode,
+                    toMode: endpointMode || 'unspecified',
+                    channel,
+                    trigger: 'api_call'
+                  });
+                }
               }
+              modeTransitionLogged = true;
             }
-            modeTransitionLogged = true;
-          }
 
-          await saveMessage(appId, userId, channel, {
-            role: 'user',
-            content: message.content,
-            mode: endpointMode
-          });
+            await saveMessage(appId, userId, channel, {
+              role: 'user',
+              content: message.content,
+              mode: endpointMode
+            });
+          }
         }
+      } else {
+        // NEW BEHAVIOR: Skip conversation store for pure API endpoints
+        logger.debug(`Preparing messages without conversation store`, {
+          systemMessageLength: systemMessage.content.length,
+          requestMessageCount: processedRequestMessages.length
+        });
+        
+        // Simply combine system message with processed request messages
+        finalMessages = [systemMessage, ...processedRequestMessages];
+        
+        logger.debug(`Final message preparation without conversation store`, {
+          total: finalMessages.length,
+          system: 1,
+          request: processedRequestMessages.length
+        });
       }
 
       // CLEAN MESSAGES FOR LLM COMPATIBILITY BEFORE SENDING
@@ -648,7 +689,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
             appId,
             channel,
             endpointMode,
-            conversationLength: existingConversation.messages.length
+            conversationLength: existingConversationLength
           });
 
           logLLMResponse(null, {
@@ -820,7 +861,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                         rtmClient,
                         enable_rtm,
                         agent_rtm_channel,
-                        endpointMode
+                        endpointMode,
+                        skipConversationStore
                       );
                       
                       endStream(controller, encoder, completeResponse, "STREAM WITH TOOL", controllerClosed);
@@ -828,8 +870,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                     } else {
                       toolExecuted = true;
                       
-                      // Save assistant response to conversation with mode
-                      if (accumulatedContent.trim()) {
+                      // Save assistant response to conversation with mode (only if not skipping)
+                      if (!skipConversationStore && accumulatedContent.trim()) {
                         const cleanedContent = cleanAssistantResponse(accumulatedContent.trim());
                         
                         logger.debug(`Saving assistant response`, {
@@ -866,7 +908,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
                 // End of stream reached without finish_reason
                 logger.debug(`End of stream - no finish_reason detected`);
                 
-                if (accumulatedContent.trim()) {
+                if (!skipConversationStore && accumulatedContent.trim()) {
                   const cleanedContent = cleanAssistantResponse(accumulatedContent.trim());
                   
                   await saveMessage(appId, userId, channel, {
@@ -951,7 +993,7 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
             appId,
             channel,
             endpointMode,
-            conversationLength: existingConversation.messages.length
+            conversationLength: existingConversationLength
           });
 
           const passResponse = await handleModelRequest(openai, {
@@ -1045,8 +1087,8 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           return NextResponse.json({ error: 'No LLM response.' }, { status: 500 });
         }
 
-        // Save assistant response to conversation with mode
-        if (accumulatedText.trim()) {
+        // Save assistant response to conversation with mode (only if not skipping)
+        if (!skipConversationStore && accumulatedText.trim()) {
           const cleanedText = cleanAssistantResponse(accumulatedText.trim());
           
           logger.debug(`Saving non-streaming assistant response`, {
