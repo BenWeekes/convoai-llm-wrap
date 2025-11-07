@@ -60,20 +60,39 @@ export interface EndpointConfig {
   };
 }
 
+export type SipConfig = {
+  authToken: string;
+  region?: string;
+  callerId: string;
+  agentPhone: string;
+  gateway: string;
+};
+
+export type ConvoAIConfig = {
+  agentId: string;
+  authToken: string;
+};
+
 export type EndpointRequest = {
   messages: any[];
   model?: string;
   baseURL?: string;
-  stream?: boolean; 
+  stream?: boolean;
   channel?: string;
   userId?: string;
   appId: string;
   simplifiedTools?: boolean;
   stream_options?: any;
-  
+
   // RTM parameters
   enable_rtm?: boolean;
   agent_rtm_uid?: string;
   agent_rtm_token?: string;
   agent_rtm_channel?: string;
+
+  // SIP configuration (for human handoff)
+  sipConfig?: SipConfig;
+
+  // ConvoAI agent configuration (for stopping agent)
+  convoAIConfig?: ConvoAIConfig;
 };

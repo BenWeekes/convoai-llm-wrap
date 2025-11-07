@@ -380,7 +380,10 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
         agent_rtm_token = '',
         agent_rtm_channel = '',
         // Context parameters
-        context = null
+        context = null,
+        // Support endpoint parameters
+        sipConfig = null,
+        convoAIConfig = null
       } = body;
 
       // Check if we should skip conversation storage for this endpoint
@@ -400,6 +403,22 @@ export function createEndpointHandler(config: EndpointConfig, endpointName?: str
           userId: shouldPrepend ? userId : 'disabled',
           communicationMode: shouldPrependMode ? 'enabled' : 'disabled'
         });
+      }
+
+      // Set request-level configs for support endpoint tools (if applicable)
+      // This allows tools to access sipConfig and convoAIConfig
+      if (endpointName === 'SUPPORT' && (sipConfig || convoAIConfig)) {
+        try {
+          // Dynamically import to avoid circular dependencies
+          const { setRequestConfigs } = await import('../endpoints/support-endpoint');
+          setRequestConfigs(sipConfig, convoAIConfig);
+          logger.debug(`[${endpointName}] Set request configs for tools`, {
+            hasSipConfig: !!sipConfig,
+            hasConvoAIConfig: !!convoAIConfig
+          });
+        } catch (err) {
+          logger.warn(`[${endpointName}] Failed to set request configs`, err);
+        }
       }
 
       // C) Initialize RTM chat for this endpoint (only if endpointName is provided AND chat is supported)
