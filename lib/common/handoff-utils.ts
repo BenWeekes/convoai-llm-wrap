@@ -88,6 +88,65 @@ export async function triggerOutboundCall(
 }
 
 /**
+ * Looks up the active agent ID for a given channel
+ *
+ * @param appId - The Agora application ID
+ * @param channel - The RTC channel name
+ * @param authToken - ConvoAI auth token
+ * @returns Promise<string | null> - Agent ID or null if not found
+ */
+export async function lookupAgentId(
+  appId: string,
+  channel: string,
+  authToken: string
+): Promise<string | null> {
+  logger.info('Looking up agent ID', { appId, channel });
+
+  try {
+    // Query the ConvoAI API to list agents
+    const response = await axios.get(
+      `https://api.agora.io/api/conversational-ai-agent/v2/projects/${appId}/agents`,
+      {
+        headers: {
+          'Authorization': `Basic ${authToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    logger.debug('Agents list response', {
+      statusCode: response.status,
+      agentCount: response.data?.agents?.length || 0
+    });
+
+    // Find agent in the specified channel
+    const agents = response.data?.agents || [];
+    const agentInChannel = agents.find((agent: any) =>
+      agent.properties?.channel === channel &&
+      agent.status === 'running'
+    );
+
+    if (agentInChannel) {
+      logger.info('Found agent in channel', {
+        agentId: agentInChannel.agent_id,
+        channel
+      });
+      return agentInChannel.agent_id;
+    }
+
+    logger.warn('No active agent found in channel', { channel });
+    return null;
+  } catch (error) {
+    logger.error('Failed to lookup agent ID', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      appId,
+      channel
+    });
+    return null;
+  }
+}
+
+/**
  * Stops the ConvoAI agent by calling the /leave API
  *
  * @param appId - The Agora application ID
@@ -102,13 +161,22 @@ export async function stopConvoAIAgent(
 ): Promise<boolean> {
   logger.info('Stopping ConvoAI agent', {
     appId,
-    channel,
-    agentId: convoAIConfig.agentId
+    channel
   });
 
   try {
+    // Look up the agent ID for this channel
+    const agentId = await lookupAgentId(appId, channel, convoAIConfig.authToken);
+
+    if (!agentId) {
+      logger.error('Cannot stop agent - no active agent found in channel', { channel });
+      return false;
+    }
+
+    logger.debug('Found agent to stop', { agentId });
+
     const response = await axios.post(
-      `https://api.agora.io/api/conversational-ai-agent/v2/projects/${appId}/agents/${convoAIConfig.agentId}/leave`,
+      `https://api.agora.io/api/conversational-ai-agent/v2/projects/${appId}/agents/${agentId}/leave`,
       {
         name: `leave-${Date.now()}`,
         properties: {
@@ -133,7 +201,7 @@ export async function stopConvoAIAgent(
 
     logger.info('ConvoAI agent stopped successfully', {
       statusCode: response.status,
-      agentId: convoAIConfig.agentId
+      agentId: agentId
     });
 
     return response.status === 200;
@@ -141,8 +209,7 @@ export async function stopConvoAIAgent(
     logger.error('Failed to stop ConvoAI agent', {
       error: error instanceof Error ? error.message : 'Unknown error',
       appId,
-      channel,
-      agentId: convoAIConfig.agentId
+      channel
     });
     return false;
   }

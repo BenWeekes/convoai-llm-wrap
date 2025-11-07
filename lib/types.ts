@@ -69,7 +69,6 @@ export type SipConfig = {
 };
 
 export type ConvoAIConfig = {
-  agentId: string;
   authToken: string;
 };
 
