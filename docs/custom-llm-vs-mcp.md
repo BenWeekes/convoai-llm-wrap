@@ -28,7 +28,7 @@ User Speech --> Agora STT --> ConvoAI Engine --> YOUR SERVER --> LLM Provider
                                               RTM Commands
                                               Business Logic
                                                      |
-                                              SSE Response --> TTS --> User
+                                              HTTP Response --> TTS --> User
 ```
 
 ### MCP Flow
@@ -38,7 +38,7 @@ User Speech --> Agora STT --> ConvoAI Engine --> LLM Provider
                                     |
                               MCP Server(s) <-- tool calls
                                     |
-                              SSE Response --> TTS --> User
+                              HTTP Response --> TTS --> User
 ```
 
 ---
@@ -75,7 +75,7 @@ User Speech --> Agora STT --> ConvoAI Engine --> LLM Provider
 | Multi-server support with per-server tool whitelisting (`allowed_tools`) | No multi-user support — no speaker identification, presence tracking, or group management |
 | Built-in tool access control — up to 128 tools per server | No custom metadata — cannot control TTS interruption per chunk |
 | | Additional latency — extra hop from engine to MCP server(s) |
-| | Transport limitation — only `streamable_http` currently; no local stdio |
+| | Transport limitation — only `streamable_http` currently; no local stdio servers |
 | | Security surface — research shows 43% of MCP implementations had injection vulnerabilities |
 
 ---
@@ -87,7 +87,7 @@ All 56 features from the [Feature Catalogue](feature-catalogue.md), rated for ea
 | # | Feature | Custom LLM | MCP |
 |---|---------|:----------:|:---:|
 | | **Streaming & Response Delivery** | | |
-| 1.1 | SSE Streaming | Y | Y |
+| 1.1 | HTTP Streaming (`streamable_http`) | Y | Y |
 | 1.2 | Stream Options (`include_usage`, etc.) | Y | Y |
 | 1.3 | Non-Streaming Responses | Y | - |
 | 1.4 | Finish Reason Signals | Y | Y |

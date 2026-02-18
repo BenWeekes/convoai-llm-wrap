@@ -16,9 +16,9 @@
 
 | # | Feature | Description | Impl 1 | Impl 2 | Impl 3 |
 |---|---------|-------------|:------:|:------:|:------:|
-| 1.1 | **SSE Streaming** | Streams LLM responses as Server-Sent Events in OpenAI-compatible `ChatCompletionChunk` format with `data: [DONE]` terminator. | Y | Y | Y |
+| 1.1 | **HTTP Streaming** | Streams LLM responses over HTTP (`streamable_http`) in OpenAI-compatible `ChatCompletionChunk` format with `data: [DONE]` terminator. | Y | Y | Y |
 | 1.2 | **Stream Options** | Supports `stream_options` parameter (e.g., `include_usage`) to control what metadata is included in streamed chunks. | | Y | Y |
-| 1.3 | **Non-Streaming Responses** | Returns complete JSON responses without streaming for clients that don't support SSE. Includes multi-pass tool calling in non-streaming mode. | Y | | |
+| 1.3 | **Non-Streaming Responses** | Returns complete JSON responses without streaming for clients that don't support `streamable_http`. Includes multi-pass tool calling in non-streaming mode. | Y | | |
 | 1.4 | **Finish Reason Signals** | Emits typed finish reasons (`stop`, `tool_calls`, `length`, `content_filter`) so the platform knows why generation ended. | Y | Y | Y |
 | 1.5 | **Usage Token Tracking** | Reports prompt and completion token counts in the streaming response for cost monitoring. | | Y | Y |
 
@@ -75,7 +75,7 @@
 |---|---------|-------------|:------:|:------:|:------:|
 | 7.1 | **Image Content in Messages** | Supports `image_url` content blocks in user messages so the LLM can process images (vision). | | | Y |
 | 7.2 | **Audio Content in Messages** | Supports `input_audio` content blocks in user messages for audio-capable models. | | | Y |
-| 7.3 | **Audio Response Streaming** | Dedicated `/audio/chat/completions` endpoint that returns audio responses as base64-encoded PCM chunks streamed over SSE. | | | Y |
+| 7.3 | **Audio Response Streaming** | Dedicated `/audio/chat/completions` endpoint that returns audio responses as base64-encoded PCM chunks streamed over HTTP. | | | Y |
 | 7.4 | **PCM Audio File Processing** | Reads PCM audio files, chunks them by sample rate and duration, base64-encodes each chunk, and streams them to the client. | | | Y |
 | 7.5 | **Modalities Parameter** | Supports `modalities` parameter (e.g., `["text"]`, `["text", "audio"]`) to specify which output types the LLM should produce. | | | Y |
 | 7.6 | **Photo / Media Sending** | Sends photos or media to users via RTM with per-user rate limiting (e.g., 30-second cooldown). | Y | | |
@@ -162,7 +162,7 @@
 | 17.1 | **Request Validation** | Validates incoming request bodies (required fields, types, ranges) using Pydantic, Zod, or framework-native binding. | Y | Y | Y |
 | 17.2 | **Graceful Degradation** | Failures in optional subsystems (cache, sandbox, RTM) are logged but don't block the main request pipeline. | Y | Y | |
 | 17.3 | **Async Cancellation Handling** | Detects client disconnection mid-stream and cleanly aborts processing (HTTP 499). | | | Y |
-| 17.4 | **Streaming Error Recovery** | Catches errors during SSE streaming and sends error events rather than dropping the connection silently. | Y | Y | Y |
+| 17.4 | **Streaming Error Recovery** | Catches errors during HTTP streaming and sends error events rather than dropping the connection silently. | Y | Y | Y |
 
 ---
 
